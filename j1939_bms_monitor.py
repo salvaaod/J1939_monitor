@@ -616,10 +616,8 @@ class BmsMonitorApp(tk.Tk):
             ttk.Entry(connection, textvariable=variable, width=width).grid(row=0, column=column * 2 + 1, sticky="w", padx=(0, 8), pady=6)
 
         self.start_button = ttk.Button(connection, text="Start monitoring", command=self.start_monitoring)
-        self.start_button.grid(row=0, column=12, padx=8, pady=6)
-        self.stop_button = ttk.Button(connection, text="Stop", command=self.stop_monitoring, state="disabled")
-        self.stop_button.grid(row=0, column=13, padx=8, pady=6)
-        ttk.Label(connection, textvariable=self.status_var).grid(row=1, column=0, columnspan=14, sticky="w", padx=8, pady=(0, 6))
+        self.start_button.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+        ttk.Label(connection, textvariable=self.status_var).grid(row=1, column=2, columnspan=10, sticky="w", padx=8, pady=(0, 6))
 
         pgn_frame = ttk.LabelFrame(self, text="Current monitored PGN frames")
         pgn_frame.pack(fill="x", padx=10, pady=6)
@@ -683,7 +681,6 @@ class BmsMonitorApp(tk.Tk):
         self.worker = MonitorWorker(config, source_address, self.event_queue, self.stop_event)
         self.worker.start()
         self.start_button.configure(state="disabled")
-        self.stop_button.configure(state="normal")
         self.status_var.set("Connecting...")
 
     def stop_monitoring(self) -> None:
@@ -706,7 +703,6 @@ class BmsMonitorApp(tk.Tk):
                 self._update_frame(int(can_id), bytes(data), parsed)
             elif event == "stopped":
                 self.start_button.configure(state="normal")
-                self.stop_button.configure(state="disabled")
                 if not self.stop_event.is_set() and not self.status_var.get().startswith("Error"):
                     self.status_var.set("Disconnected")
                 elif self.stop_event.is_set():
