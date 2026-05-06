@@ -151,20 +151,22 @@ class SignalDefinition:
         return self.start_byte * 8 + self.start_bit
 
 
+ALARM_VALUE_MAP = {0: "no", 1: "YES"}
+
 SIGNALS: tuple[SignalDefinition, ...] = (
     SignalDefinition(PGN_PROP_00, "Battery pack voltage", 0, 0, 16, 0.05, 0.0, "V", 0xFFFF),
     SignalDefinition(PGN_PROP_00, "Battery pack net current", 2, 0, 16, 0.05, -1000.0, "A", 0xFFFF),
     SignalDefinition(PGN_PROP_00, "Battery pack temperature", 4, 0, 8, 1.0, -40.0, "deg C", 0xFF),
-    SignalDefinition(PGN_PROP_01, "LowLevel Alarm", 0, 0, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Low Level alarm"}),
-    SignalDefinition(PGN_PROP_01, "CriticalLow Alarm", 0, 1, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Critical Level alarm"}),
     SignalDefinition(PGN_PROP_01, "Remaining Time", 1, 0, 16, 1.0, 0.0, "min", 0xFFFF),
     SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF),
-    SignalDefinition(PGN_PROP_01, "Reserved Alarm 3", 0, 2, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
-    SignalDefinition(PGN_PROP_01, "Reserved Alarm 4", 0, 3, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
-    SignalDefinition(PGN_PROP_01, "Reserved Alarm 5", 0, 4, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
-    SignalDefinition(PGN_PROP_01, "Reserved Alarm 6", 0, 5, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
-    SignalDefinition(PGN_PROP_01, "Reserved Alarm 7", 0, 6, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
-    SignalDefinition(PGN_PROP_01, "Reserved Alarm 8", 0, 7, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
+    SignalDefinition(PGN_PROP_01, "LowLevel Alarm", 0, 0, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
+    SignalDefinition(PGN_PROP_01, "CriticalLow Alarm", 0, 1, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
+    SignalDefinition(PGN_PROP_01, "Reserved Alarm 3", 0, 2, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
+    SignalDefinition(PGN_PROP_01, "Reserved Alarm 4", 0, 3, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
+    SignalDefinition(PGN_PROP_01, "Reserved Alarm 5", 0, 4, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
+    SignalDefinition(PGN_PROP_01, "Reserved Alarm 6", 0, 5, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
+    SignalDefinition(PGN_PROP_01, "Reserved Alarm 7", 0, 6, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
+    SignalDefinition(PGN_PROP_01, "Reserved Alarm 8", 0, 7, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
 )
 
 
@@ -177,7 +179,6 @@ SIGNALS: tuple[SignalDefinition, ...] = (
 DEFAULT_PGN_COLUMN_WIDTHS: dict[str, int] = {
     "pgn": 137,
     "can_id": 132,
-    "source": 111,
     "payload": 184,
     "age": 172,
 }
@@ -343,20 +344,32 @@ def extract_little_endian(data: bytes, start_bit: int, length: int) -> int:
     return (raw >> start_bit) & mask
 
 
+def format_raw_value(raw: int, bit_length: int) -> str:
+    """Format raw signal data with enough leading zeros for its bit length."""
+    hex_digits = max(1, (bit_length + 3) // 4)
+    return f"0x{raw:0{hex_digits}X}"
+
+
+def format_scaled_value(value: float, definition: SignalDefinition) -> str:
+    if definition.factor < 0.01:
+        text = f"{abs(value):.3f}"
+    elif definition.factor < 1:
+        text = f"{abs(value):.2f}"
+    else:
+        text = f"{abs(value):.0f}"
+    sign = "-" if value < 0 else " "
+    return f"{sign}{text}"
+
+
 def format_signal_value(definition: SignalDefinition, data: bytes) -> tuple[str, str]:
     raw = extract_little_endian(data, definition.start_bit_index, definition.bit_length)
+    raw_text = format_raw_value(raw, definition.bit_length)
     if definition.na_value is not None and raw == definition.na_value:
-        return "N/A", f"0x{raw:X}"
+        return "N/A", raw_text
     if definition.value_map:
-        return definition.value_map.get(raw, str(raw)), f"0x{raw:X}"
+        return definition.value_map.get(raw, str(raw)), raw_text
     scaled = raw * definition.factor + definition.offset
-    if definition.factor < 0.01:
-        text = f"{scaled:.3f}"
-    elif definition.factor < 1:
-        text = f"{scaled:.2f}"
-    else:
-        text = f"{scaled:.0f}"
-    return text, f"0x{raw:X}"
+    return format_scaled_value(scaled, definition), raw_text
 
 
 # ---------------------------------------------------------------------------
@@ -599,16 +612,12 @@ class BmsMonitorApp(tk.Tk):
         self.source_address_var = tk.StringVar(
             value=setting_as_str(self.settings, "source_address", f"0x{PREFERRED_SOURCE_ADDRESS:02X}")
         )
-        self.timing0_var = tk.StringVar(value=setting_as_str(self.settings, "timing0", f"0x{TIMING0_500K:02X}"))
-        self.timing1_var = tk.StringVar(value=setting_as_str(self.settings, "timing1", f"0x{TIMING1_500K:02X}"))
         self.status_var = tk.StringVar(value="Disconnected")
 
         fields = (
             ("Device type", self.device_type_var, 6),
             ("Device index", self.device_index_var, 6),
             ("CAN index", self.can_index_var, 6),
-            ("Timing0", self.timing0_var, 8),
-            ("Timing1", self.timing1_var, 8),
             ("Monitor SA", self.source_address_var, 8),
         )
         for column, (label, variable, width) in enumerate(fields):
@@ -621,20 +630,19 @@ class BmsMonitorApp(tk.Tk):
 
         pgn_frame = ttk.LabelFrame(self, text="Current monitored PGN frames")
         pgn_frame.pack(fill="x", padx=10, pady=6)
-        self.pgn_tree = ttk.Treeview(pgn_frame, columns=("pgn", "can_id", "source", "payload", "age"), show="headings", height=3)
+        self.pgn_tree = ttk.Treeview(pgn_frame, columns=("pgn", "can_id", "payload", "age"), show="headings", height=3)
         pgn_column_widths = merged_column_widths(self.settings.get("pgn_column_widths"), DEFAULT_PGN_COLUMN_WIDTHS)
         for column, heading, width in (
             ("pgn", "PGN", pgn_column_widths["pgn"]),
             ("can_id", "CAN ID", pgn_column_widths["can_id"]),
-            ("source", "Source", pgn_column_widths["source"]),
             ("payload", "Payload (hex)", pgn_column_widths["payload"]),
             ("age", "Last update", pgn_column_widths["age"]),
         ):
             self.pgn_tree.heading(column, text=heading)
             self.pgn_tree.column(column, width=width, anchor="w")
         self.pgn_tree.pack(fill="x", padx=8, pady=8)
-        for pgn, name in ((PGN_PROP_00, "PropB_00"), (PGN_PROP_01, "PropB_01")):
-            item = self.pgn_tree.insert("", "end", values=(f"0x{pgn:05X} {name}", "-", "-", "-", "never"))
+        for pgn in MONITORED_PGNS:
+            item = self.pgn_tree.insert("", "end", values=(f"0x{pgn:05X}", "-", "-", "never"))
             self.pgn_rows[pgn] = item
 
         signals_frame = ttk.LabelFrame(self, text="Decoded signal values")
@@ -671,8 +679,6 @@ class BmsMonitorApp(tk.Tk):
                 device_type=int(self.device_type_var.get()),
                 device_index=int(self.device_index_var.get()),
                 can_index=int(self.can_index_var.get()),
-                timing0=int(self.timing0_var.get(), 0),
-                timing1=int(self.timing1_var.get(), 0),
             )
         except Exception as exc:  # noqa: BLE001 - validation message is shown to operator
             messagebox.showerror("Invalid configuration", str(exc))
@@ -713,10 +719,9 @@ class BmsMonitorApp(tk.Tk):
         item = self.pgn_rows.get(parsed.pgn)
         timestamp = time.strftime("%H:%M:%S")
         if item:
-            name = "PropB_00" if parsed.pgn == PGN_PROP_00 else "PropB_01"
             self.pgn_tree.item(
                 item,
-                values=(f"0x{parsed.pgn:05X} {name}", f"0x{can_id:08X}", f"0x{parsed.source_address:02X}", bytes_hex(data), timestamp),
+                values=(f"0x{parsed.pgn:05X}", f"0x{can_id:08X}", bytes_hex(data), timestamp),
             )
         for definition in SIGNALS:
             if definition.pgn != parsed.pgn:
@@ -738,8 +743,6 @@ class BmsMonitorApp(tk.Tk):
             "device_type": self.device_type_var.get().strip() or str(DEFAULT_DEVICE_TYPE),
             "device_index": self.device_index_var.get().strip() or str(DEFAULT_DEVICE_INDEX),
             "can_index": self.can_index_var.get().strip() or str(DEFAULT_CAN_INDEX),
-            "timing0": self.timing0_var.get().strip() or f"0x{TIMING0_500K:02X}",
-            "timing1": self.timing1_var.get().strip() or f"0x{TIMING1_500K:02X}",
             "source_address": self.source_address_var.get().strip() or f"0x{PREFERRED_SOURCE_ADDRESS:02X}",
             "window_geometry": self.geometry(),
             "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
