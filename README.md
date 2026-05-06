@@ -71,6 +71,14 @@ From the application directory on Windows:
 python .\j1939_bms_monitor.py
 ```
 
+To print the startup window size and table column widths to the console while launching the app, add `--export`:
+
+```powershell
+python .\j1939_bms_monitor.py --export
+```
+
+The export is printed as JSON with `window_geometry`, `window_size`, `pgn_column_widths`, and `signal_column_widths` fields.
+
 Then verify the connection settings in the top panel and click **Start monitoring**.
 
 ## Default Connection Settings

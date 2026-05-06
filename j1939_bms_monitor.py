@@ -12,6 +12,7 @@ same directory as this script or bundled executable::
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import json
 import queue
@@ -590,7 +591,7 @@ class MonitorWorker(threading.Thread):
 
 
 class BmsMonitorApp(tk.Tk):
-    def __init__(self):
+    def __init__(self, export_layout: bool = False):
         super().__init__()
         self.settings_store = SettingsStore()
         self.settings = self.settings_store.load()
@@ -605,6 +606,8 @@ class BmsMonitorApp(tk.Tk):
         self.timed_out_signals: set[str] = set()
         self.pgn_rows: dict[int, str] = {}
         self._build_ui()
+        if export_layout:
+            self._print_layout_export()
         self.after(100, self._poll_worker)
 
     def _build_ui(self) -> None:
@@ -773,6 +776,18 @@ class BmsMonitorApp(tk.Tk):
     def _signal_key(definition: SignalDefinition) -> str:
         return f"{definition.pgn:05X}:{definition.label}"
 
+    def _layout_export(self) -> dict[str, object]:
+        self.update_idletasks()
+        return {
+            "window_geometry": self.geometry(),
+            "window_size": {"width": self.winfo_width(), "height": self.winfo_height()},
+            "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
+            "signal_column_widths": self._tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS),
+        }
+
+    def _print_layout_export(self) -> None:
+        print(json.dumps(self._layout_export(), indent=2, sort_keys=True), flush=True)
+
     def _tree_column_widths(self, tree: ttk.Treeview, columns: Iterable[str]) -> dict[str, int]:
         return {column: int(tree.column(column, "width")) for column in columns}
 
@@ -802,5 +817,20 @@ class BmsMonitorApp(tk.Tk):
         super().destroy()
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Tkinter J1939 MASTERvOLT BMS monitor")
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help="print the startup window geometry and table column widths to stdout",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    BmsMonitorApp(export_layout=args.export).mainloop()
+
+
 if __name__ == "__main__":
-    BmsMonitorApp().mainloop()
+    main()
