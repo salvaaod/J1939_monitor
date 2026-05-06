@@ -79,9 +79,11 @@ python .\j1939_bms_monitor.py --export
 
 The export is printed as JSON with `window_geometry`, `window_size`, `pgn_column_widths`, and `signal_column_widths` fields.
 
-Then verify the connection settings in the top panel and click **Start monitoring**.
+Adjust **Monitor SA** if needed, then click **Start monitoring**.
 
 ## Default Connection Settings
+
+The adapter/channel settings use fixed application defaults and are no longer editable in the UI. **Monitor SA** remains editable beside the **Start monitoring** button.
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
@@ -158,7 +160,7 @@ Transmit and receive paths set and expect 29-bit extended CAN frames, which J193
 
 ### BmsMonitorApp
 
-`BmsMonitorApp` builds the Tkinter UI, validates user-entered connection settings, starts and stops the worker thread, polls worker events, updates the raw PGN table, decodes signal values, and saves operator settings when the window closes.
+`BmsMonitorApp` builds the Tkinter UI, validates the user-entered monitor source address, starts and stops the worker thread, polls worker events, updates the raw PGN table, decodes signal values, and saves operator settings when the window closes.
 
 ## Monitored Signals
 

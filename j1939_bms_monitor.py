@@ -265,13 +265,6 @@ def merged_column_widths(saved_widths: object, default_widths: dict[str, int]) -
     return widths
 
 
-def setting_as_entry_value(settings: dict[str, Any], key: str, default: object) -> str:
-    value = settings.get(key, default)
-    if value is None:
-        return str(default)
-    return str(value)
-
-
 def setting_as_str(settings: dict[str, Any], key: str, default: str) -> str:
     value = settings.get(key, default)
     if isinstance(value, str) and value:
@@ -614,27 +607,19 @@ class BmsMonitorApp(tk.Tk):
         connection = ttk.LabelFrame(self, text="GCAN / USBCAN connection")
         connection.pack(fill="x", padx=10, pady=8)
 
-        self.device_type_var = tk.StringVar(value=setting_as_entry_value(self.settings, "device_type", DEFAULT_DEVICE_TYPE))
-        self.device_index_var = tk.StringVar(value=setting_as_entry_value(self.settings, "device_index", DEFAULT_DEVICE_INDEX))
-        self.can_index_var = tk.StringVar(value=setting_as_entry_value(self.settings, "can_index", DEFAULT_CAN_INDEX))
         self.source_address_var = tk.StringVar(
             value=setting_as_str(self.settings, "source_address", f"0x{PREFERRED_SOURCE_ADDRESS:02X}")
         )
         self.status_var = tk.StringVar(value="Disconnected")
 
-        fields = (
-            ("Device type", self.device_type_var, 6),
-            ("Device index", self.device_index_var, 6),
-            ("CAN index", self.can_index_var, 6),
-            ("Monitor SA", self.source_address_var, 8),
-        )
-        for column, (label, variable, width) in enumerate(fields):
-            ttk.Label(connection, text=label).grid(row=0, column=column * 2, sticky="w", padx=(8, 2), pady=6)
-            ttk.Entry(connection, textvariable=variable, width=width).grid(row=0, column=column * 2 + 1, sticky="w", padx=(0, 8), pady=6)
-
         self.start_button = ttk.Button(connection, text="Start monitoring", command=self.start_monitoring)
-        self.start_button.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
-        ttk.Label(connection, textvariable=self.status_var).grid(row=1, column=2, columnspan=10, sticky="w", padx=8, pady=(0, 6))
+        self.start_button.grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(connection, text="Monitor SA").grid(row=0, column=1, sticky="w", padx=(8, 2), pady=6)
+        ttk.Entry(connection, textvariable=self.source_address_var, width=8).grid(
+            row=0, column=2, sticky="w", padx=(0, 8), pady=6
+        )
+        ttk.Label(connection, textvariable=self.status_var).grid(row=0, column=3, sticky="w", padx=8, pady=6)
+        connection.columnconfigure(3, weight=1)
 
         pgn_frame = ttk.LabelFrame(self, text="Current monitored PGN frames")
         pgn_frame.pack(fill="x", padx=10, pady=6)
@@ -683,11 +668,7 @@ class BmsMonitorApp(tk.Tk):
             source_address = int(self.source_address_var.get(), 0)
             if not 0 <= source_address <= 253:
                 raise ValueError("Monitor SA must be between 0x00 and 0xFD")
-            config = DeviceConfig(
-                device_type=int(self.device_type_var.get()),
-                device_index=int(self.device_index_var.get()),
-                can_index=int(self.can_index_var.get()),
-            )
+            config = DeviceConfig()
         except Exception as exc:  # noqa: BLE001 - validation message is shown to operator
             messagebox.showerror("Invalid configuration", str(exc))
             return
@@ -794,9 +775,6 @@ class BmsMonitorApp(tk.Tk):
     def _collect_settings(self) -> dict[str, Any]:
         self.update_idletasks()
         return {
-            "device_type": self.device_type_var.get().strip() or str(DEFAULT_DEVICE_TYPE),
-            "device_index": self.device_index_var.get().strip() or str(DEFAULT_DEVICE_INDEX),
-            "can_index": self.can_index_var.get().strip() or str(DEFAULT_CAN_INDEX),
             "source_address": self.source_address_var.get().strip() or f"0x{PREFERRED_SOURCE_ADDRESS:02X}",
             "window_geometry": self.geometry(),
             "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
