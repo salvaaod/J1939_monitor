@@ -11,7 +11,7 @@ A Windows desktop monitor for MASTERvOLT battery-management-system messages on a
   - `0x00FF00`
   - `0x00FF01`
 - **Live raw frame display** showing PGN, CAN ID, payload bytes, and last-update time.
-- **Live decoded signal table** for pack voltage, pack current, pack temperature, remaining time, state of charge, and alarms.
+- **Live decoded signal table** for pack voltage, pack current, pack temperature, remaining time, state of charge, and alarms, with per-signal timeout display after 10 seconds without fresh data.
 - **J1939 network-management participation** including address claim handling and responses to requests for address claim and component identification.
 - **Persistent operator settings** using the current-user Windows registry on Windows and a JSON file in the user home directory on non-Windows development systems.
 
@@ -159,7 +159,7 @@ Transmit and receive paths set and expect 29-bit extended CAN frames, which J193
 | `0x00FF00` | Battery pack voltage | raw × 0.05 | V |
 | `0x00FF00` | Battery pack net current | raw × 0.05 − 1000 | A |
 | `0x00FF00` | Battery pack temperature | raw − 40 | deg C |
-| `0x00FF01` | Remaining Time | raw | min |
+| `0x00FF01` | Remaining Time | raw | minutes |
 | `0x00FF01` | Battery pack SOC | raw × 0.0025 | % |
 | `0x00FF01` | LowLevel Alarm | `0` = no, `1` = YES | |
 | `0x00FF01` | CriticalLow Alarm | `0` = no, `1` = YES | |

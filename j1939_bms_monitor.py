@@ -82,6 +82,9 @@ PGN_COMPONENT_IDENTIFICATION = 0x00FEEB
 PGN_PROP_00 = 0x00FF00
 PGN_PROP_01 = 0x00FF01
 MONITORED_PGNS = (PGN_PROP_00, PGN_PROP_01)
+SIGNAL_TIMEOUT_SECONDS = 10.0
+NO_FRAME_TEXT = "No frame"
+TIMEOUT_TEXT = "timeout"
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +160,7 @@ SIGNALS: tuple[SignalDefinition, ...] = (
     SignalDefinition(PGN_PROP_00, "Battery pack voltage", 0, 0, 16, 0.05, 0.0, "V", 0xFFFF),
     SignalDefinition(PGN_PROP_00, "Battery pack net current", 2, 0, 16, 0.05, -1000.0, "A", 0xFFFF),
     SignalDefinition(PGN_PROP_00, "Battery pack temperature", 4, 0, 8, 1.0, -40.0, "deg C", 0xFF),
-    SignalDefinition(PGN_PROP_01, "Remaining Time", 1, 0, 16, 1.0, 0.0, "min", 0xFFFF),
+    SignalDefinition(PGN_PROP_01, "Remaining Time", 1, 0, 16, 1.0, 0.0, "minutes", 0xFFFF),
     SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF),
     SignalDefinition(PGN_PROP_01, "LowLevel Alarm", 0, 0, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
     SignalDefinition(PGN_PROP_01, "CriticalLow Alarm", 0, 1, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
@@ -598,6 +601,8 @@ class BmsMonitorApp(tk.Tk):
         self.stop_event = threading.Event()
         self.worker: MonitorWorker | None = None
         self.signal_rows: dict[str, str] = {}
+        self.signal_update_times: dict[str, float] = {}
+        self.timed_out_signals: set[str] = set()
         self.pgn_rows: dict[int, str] = {}
         self._build_ui()
         self.after(100, self._poll_worker)
@@ -664,7 +669,7 @@ class BmsMonitorApp(tk.Tk):
             item = self.signal_tree.insert(
                 "",
                 "end",
-                values=(f"0x{definition.pgn:05X}", definition.label, "-", "No frame received", definition.unit),
+                values=(f"0x{definition.pgn:05X}", definition.label, "-", NO_FRAME_TEXT, definition.unit),
             )
             self.signal_rows[key] = item
 
@@ -684,6 +689,7 @@ class BmsMonitorApp(tk.Tk):
             messagebox.showerror("Invalid configuration", str(exc))
             return
         self.stop_event.clear()
+        self._reset_signal_rows()
         self.worker = MonitorWorker(config, source_address, self.event_queue, self.stop_event)
         self.worker.start()
         self.start_button.configure(state="disabled")
@@ -713,7 +719,36 @@ class BmsMonitorApp(tk.Tk):
                     self.status_var.set("Disconnected")
                 elif self.stop_event.is_set():
                     self.status_var.set("Stopped")
+        self._expire_stale_signals()
         self.after(100, self._poll_worker)
+
+    def _reset_signal_rows(self) -> None:
+        self.signal_update_times.clear()
+        self.timed_out_signals.clear()
+        for definition in SIGNALS:
+            key = self._signal_key(definition)
+            row = self.signal_rows.get(key)
+            if row:
+                self.signal_tree.item(
+                    row,
+                    values=(f"0x{definition.pgn:05X}", definition.label, "-", NO_FRAME_TEXT, definition.unit),
+                )
+
+    def _expire_stale_signals(self) -> None:
+        now = time.monotonic()
+        for definition in SIGNALS:
+            key = self._signal_key(definition)
+            updated_at = self.signal_update_times.get(key)
+            if updated_at is None or key in self.timed_out_signals:
+                continue
+            if now - updated_at <= SIGNAL_TIMEOUT_SECONDS:
+                continue
+            row = self.signal_rows[key]
+            self.signal_tree.item(
+                row,
+                values=(f"0x{definition.pgn:05X}", definition.label, "-", TIMEOUT_TEXT, definition.unit),
+            )
+            self.timed_out_signals.add(key)
 
     def _update_frame(self, can_id: int, data: bytes, parsed: ParsedId) -> None:
         item = self.pgn_rows.get(parsed.pgn)
@@ -723,12 +758,16 @@ class BmsMonitorApp(tk.Tk):
                 item,
                 values=(f"0x{parsed.pgn:05X}", f"0x{can_id:08X}", bytes_hex(data), timestamp),
             )
+        updated_at = time.monotonic()
         for definition in SIGNALS:
             if definition.pgn != parsed.pgn:
                 continue
             value, raw = format_signal_value(definition, data)
-            row = self.signal_rows[self._signal_key(definition)]
+            key = self._signal_key(definition)
+            row = self.signal_rows[key]
             self.signal_tree.item(row, values=(f"0x{definition.pgn:05X}", definition.label, raw, value, definition.unit))
+            self.signal_update_times[key] = updated_at
+            self.timed_out_signals.discard(key)
 
     @staticmethod
     def _signal_key(definition: SignalDefinition) -> str:
