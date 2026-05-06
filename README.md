@@ -1,16 +1,16 @@
-# J1939 MASTERvOLT BMS Monitor
+# J1939 MASTERVOLT BMS Monitor
 
 A Windows desktop monitor for MASTERvOLT battery-management-system messages on a J1939 CAN bus. The application uses Tkinter for the UI and the GCAN / USBCAN Windows driver DLL (`ECanVci.dll`) through Python `ctypes`.
 
 ## Features
 
-- **GCAN / USBCAN adapter connection** with editable device type, device index, CAN channel index, and monitor source address. The CAN channel is always initialized for 500 kbps.
+- **GCAN / USBCAN adapter connection** with fixed adapter/channel defaults, an editable monitor source address, and 500 kbps CAN-channel initialization.
 - **Application-local DLL loading**: `ECanVci.dll` is always loaded internally from the same directory as the running script or bundled executable, with no operator DLL path field.
 - **J1939 29-bit extended-frame support** for receiving and transmitting classic 8-byte CAN frames.
 - **MASTERvOLT proprietary BMS PGN monitoring** for:
   - `0x00FF00`
   - `0x00FF01`
-- **Live raw frame display** showing PGN, CAN ID, payload bytes, and last-update time.
+- **Live raw frame display** showing PGN, CAN ID, payload bytes, and last-update time, with stale payloads replaced by `timeout` after 10 seconds without fresh data.
 - **Live decoded signal table** for pack voltage, pack current, pack temperature, remaining time, state of charge, and alarms, with per-signal timeout display after 10 seconds without fresh data.
 - **J1939 network-management participation** including address claim handling and responses to requests for address claim and component identification.
 - **Persistent operator settings** using the current-user Windows registry on Windows and a JSON file in the user home directory on non-Windows development systems.
@@ -71,9 +71,19 @@ From the application directory on Windows:
 python .\j1939_bms_monitor.py
 ```
 
-Then verify the connection settings in the top panel and click **Start monitoring**.
+To print the startup window size and table column widths to the console while launching the app, add `--export`:
+
+```powershell
+python .\j1939_bms_monitor.py --export
+```
+
+The export is printed as JSON with `window_geometry`, `window_size`, `pgn_column_widths`, and `signal_column_widths` fields.
+
+Adjust **Monitor SA** if needed, then click **Start monitoring**.
 
 ## Default Connection Settings
+
+The adapter/channel settings use fixed application defaults and are no longer editable in the UI. **Monitor SA** remains editable beside the **Start monitoring** button.
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
@@ -150,7 +160,7 @@ Transmit and receive paths set and expect 29-bit extended CAN frames, which J193
 
 ### BmsMonitorApp
 
-`BmsMonitorApp` builds the Tkinter UI, validates user-entered connection settings, starts and stops the worker thread, polls worker events, updates the raw PGN table, decodes signal values, and saves operator settings when the window closes.
+`BmsMonitorApp` builds the Tkinter UI, validates the user-entered monitor source address, starts and stops the worker thread, polls worker events, updates the raw PGN table, decodes signal values, and saves operator settings when the window closes.
 
 ## Monitored Signals
 

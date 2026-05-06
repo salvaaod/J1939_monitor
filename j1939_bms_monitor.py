@@ -12,6 +12,7 @@ same directory as this script or bundled executable::
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import json
 import queue
@@ -38,7 +39,7 @@ DEFAULT_DEVICE_TYPE = USBCAN_II
 DEFAULT_DEVICE_INDEX = 0
 DEFAULT_CAN_INDEX = 0
 DEFAULT_DLL_NAME = "ECanVci.dll"
-DEFAULT_WINDOW_GEOMETRY = "773x604"
+DEFAULT_WINDOW_GEOMETRY = "480x570+99+79"
 SETTINGS_REGISTRY_PATH = r"Software\J1939BmsMonitor"
 SETTINGS_REGISTRY_VALUE = "Settings"
 SETTINGS_FILE_NAME = ".j1939_bms_monitor_settings.json"
@@ -148,6 +149,7 @@ class SignalDefinition:
     unit: str = ""
     na_value: int | None = None
     value_map: dict[int, str] | None = None
+    decimal_places: int | None = None
 
     @property
     def start_bit_index(self) -> int:
@@ -161,7 +163,7 @@ SIGNALS: tuple[SignalDefinition, ...] = (
     SignalDefinition(PGN_PROP_00, "Battery pack net current", 2, 0, 16, 0.05, -1000.0, "A", 0xFFFF),
     SignalDefinition(PGN_PROP_00, "Battery pack temperature", 4, 0, 8, 1.0, -40.0, "deg C", 0xFF),
     SignalDefinition(PGN_PROP_01, "Remaining Time", 1, 0, 16, 1.0, 0.0, "minutes", 0xFFFF),
-    SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF),
+    SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF, decimal_places=1),
     SignalDefinition(PGN_PROP_01, "LowLevel Alarm", 0, 0, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
     SignalDefinition(PGN_PROP_01, "CriticalLow Alarm", 0, 1, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
     SignalDefinition(PGN_PROP_01, "Reserved Alarm 3", 0, 2, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
@@ -180,17 +182,17 @@ SIGNALS: tuple[SignalDefinition, ...] = (
 
 
 DEFAULT_PGN_COLUMN_WIDTHS: dict[str, int] = {
-    "pgn": 137,
-    "can_id": 132,
-    "payload": 184,
-    "age": 172,
+    "pgn": 83,
+    "can_id": 102,
+    "payload": 162,
+    "age": 91,
 }
 DEFAULT_SIGNAL_COLUMN_WIDTHS: dict[str, int] = {
-    "pgn": 99,
-    "signal": 151,
-    "raw": 301,
-    "value": 139,
-    "unit": 46,
+    "pgn": 76,
+    "signal": 174,
+    "raw": 68,
+    "value": 66,
+    "unit": 54,
 }
 
 
@@ -262,13 +264,6 @@ def merged_column_widths(saved_widths: object, default_widths: dict[str, int]) -
         if width > 0:
             widths[column] = width
     return widths
-
-
-def setting_as_entry_value(settings: dict[str, Any], key: str, default: object) -> str:
-    value = settings.get(key, default)
-    if value is None:
-        return str(default)
-    return str(value)
 
 
 def setting_as_str(settings: dict[str, Any], key: str, default: str) -> str:
@@ -354,7 +349,9 @@ def format_raw_value(raw: int, bit_length: int) -> str:
 
 
 def format_scaled_value(value: float, definition: SignalDefinition) -> str:
-    if definition.factor < 0.01:
+    if definition.decimal_places is not None:
+        text = f"{abs(value):.{definition.decimal_places}f}"
+    elif definition.factor < 0.01:
         text = f"{abs(value):.3f}"
     elif definition.factor < 1:
         text = f"{abs(value):.2f}"
@@ -590,11 +587,11 @@ class MonitorWorker(threading.Thread):
 
 
 class BmsMonitorApp(tk.Tk):
-    def __init__(self):
+    def __init__(self, export_layout: bool = False):
         super().__init__()
         self.settings_store = SettingsStore()
         self.settings = self.settings_store.load()
-        self.title("J1939 MASTERvOLT BMS Monitor")
+        self.title("J1939 MASTERVOLT BMS Monitor")
         self.geometry(setting_as_str(self.settings, "window_geometry", DEFAULT_WINDOW_GEOMETRY))
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -604,34 +601,30 @@ class BmsMonitorApp(tk.Tk):
         self.signal_update_times: dict[str, float] = {}
         self.timed_out_signals: set[str] = set()
         self.pgn_rows: dict[int, str] = {}
+        self.pgn_update_times: dict[int, float] = {}
+        self.timed_out_pgns: set[int] = set()
         self._build_ui()
+        if export_layout:
+            self._print_layout_export()
         self.after(100, self._poll_worker)
 
     def _build_ui(self) -> None:
         connection = ttk.LabelFrame(self, text="GCAN / USBCAN connection")
         connection.pack(fill="x", padx=10, pady=8)
 
-        self.device_type_var = tk.StringVar(value=setting_as_entry_value(self.settings, "device_type", DEFAULT_DEVICE_TYPE))
-        self.device_index_var = tk.StringVar(value=setting_as_entry_value(self.settings, "device_index", DEFAULT_DEVICE_INDEX))
-        self.can_index_var = tk.StringVar(value=setting_as_entry_value(self.settings, "can_index", DEFAULT_CAN_INDEX))
         self.source_address_var = tk.StringVar(
             value=setting_as_str(self.settings, "source_address", f"0x{PREFERRED_SOURCE_ADDRESS:02X}")
         )
         self.status_var = tk.StringVar(value="Disconnected")
 
-        fields = (
-            ("Device type", self.device_type_var, 6),
-            ("Device index", self.device_index_var, 6),
-            ("CAN index", self.can_index_var, 6),
-            ("Monitor SA", self.source_address_var, 8),
-        )
-        for column, (label, variable, width) in enumerate(fields):
-            ttk.Label(connection, text=label).grid(row=0, column=column * 2, sticky="w", padx=(8, 2), pady=6)
-            ttk.Entry(connection, textvariable=variable, width=width).grid(row=0, column=column * 2 + 1, sticky="w", padx=(0, 8), pady=6)
-
         self.start_button = ttk.Button(connection, text="Start monitoring", command=self.start_monitoring)
-        self.start_button.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
-        ttk.Label(connection, textvariable=self.status_var).grid(row=1, column=2, columnspan=10, sticky="w", padx=8, pady=(0, 6))
+        self.start_button.grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(connection, text="Monitor SA").grid(row=0, column=1, sticky="w", padx=(8, 2), pady=6)
+        ttk.Entry(connection, textvariable=self.source_address_var, width=8).grid(
+            row=0, column=2, sticky="w", padx=(0, 8), pady=6
+        )
+        ttk.Label(connection, textvariable=self.status_var).grid(row=0, column=3, sticky="w", padx=8, pady=6)
+        connection.columnconfigure(3, weight=1)
 
         pgn_frame = ttk.LabelFrame(self, text="Current monitored PGN frames")
         pgn_frame.pack(fill="x", padx=10, pady=6)
@@ -680,15 +673,12 @@ class BmsMonitorApp(tk.Tk):
             source_address = int(self.source_address_var.get(), 0)
             if not 0 <= source_address <= 253:
                 raise ValueError("Monitor SA must be between 0x00 and 0xFD")
-            config = DeviceConfig(
-                device_type=int(self.device_type_var.get()),
-                device_index=int(self.device_index_var.get()),
-                can_index=int(self.can_index_var.get()),
-            )
+            config = DeviceConfig()
         except Exception as exc:  # noqa: BLE001 - validation message is shown to operator
             messagebox.showerror("Invalid configuration", str(exc))
             return
         self.stop_event.clear()
+        self._reset_pgn_rows()
         self._reset_signal_rows()
         self.worker = MonitorWorker(config, source_address, self.event_queue, self.stop_event)
         self.worker.start()
@@ -719,8 +709,15 @@ class BmsMonitorApp(tk.Tk):
                     self.status_var.set("Disconnected")
                 elif self.stop_event.is_set():
                     self.status_var.set("Stopped")
+        self._expire_stale_pgns()
         self._expire_stale_signals()
         self.after(100, self._poll_worker)
+
+    def _reset_pgn_rows(self) -> None:
+        self.pgn_update_times.clear()
+        self.timed_out_pgns.clear()
+        for pgn, row in self.pgn_rows.items():
+            self.pgn_tree.item(row, values=(f"0x{pgn:05X}", "-", "-", "never"))
 
     def _reset_signal_rows(self) -> None:
         self.signal_update_times.clear()
@@ -733,6 +730,17 @@ class BmsMonitorApp(tk.Tk):
                     row,
                     values=(f"0x{definition.pgn:05X}", definition.label, "-", NO_FRAME_TEXT, definition.unit),
                 )
+
+    def _expire_stale_pgns(self) -> None:
+        now = time.monotonic()
+        for pgn, row in self.pgn_rows.items():
+            updated_at = self.pgn_update_times.get(pgn)
+            if updated_at is None or pgn in self.timed_out_pgns:
+                continue
+            if now - updated_at <= SIGNAL_TIMEOUT_SECONDS:
+                continue
+            self.pgn_tree.item(row, values=(f"0x{pgn:05X}", "-", TIMEOUT_TEXT, TIMEOUT_TEXT))
+            self.timed_out_pgns.add(pgn)
 
     def _expire_stale_signals(self) -> None:
         now = time.monotonic()
@@ -753,12 +761,14 @@ class BmsMonitorApp(tk.Tk):
     def _update_frame(self, can_id: int, data: bytes, parsed: ParsedId) -> None:
         item = self.pgn_rows.get(parsed.pgn)
         timestamp = time.strftime("%H:%M:%S")
+        updated_at = time.monotonic()
         if item:
             self.pgn_tree.item(
                 item,
                 values=(f"0x{parsed.pgn:05X}", f"0x{can_id:08X}", bytes_hex(data), timestamp),
             )
-        updated_at = time.monotonic()
+            self.pgn_update_times[parsed.pgn] = updated_at
+            self.timed_out_pgns.discard(parsed.pgn)
         for definition in SIGNALS:
             if definition.pgn != parsed.pgn:
                 continue
@@ -773,15 +783,24 @@ class BmsMonitorApp(tk.Tk):
     def _signal_key(definition: SignalDefinition) -> str:
         return f"{definition.pgn:05X}:{definition.label}"
 
+    def _layout_export(self) -> dict[str, object]:
+        self.update_idletasks()
+        return {
+            "window_geometry": self.geometry(),
+            "window_size": {"width": self.winfo_width(), "height": self.winfo_height()},
+            "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
+            "signal_column_widths": self._tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS),
+        }
+
+    def _print_layout_export(self) -> None:
+        print(json.dumps(self._layout_export(), indent=2, sort_keys=True), flush=True)
+
     def _tree_column_widths(self, tree: ttk.Treeview, columns: Iterable[str]) -> dict[str, int]:
         return {column: int(tree.column(column, "width")) for column in columns}
 
     def _collect_settings(self) -> dict[str, Any]:
         self.update_idletasks()
         return {
-            "device_type": self.device_type_var.get().strip() or str(DEFAULT_DEVICE_TYPE),
-            "device_index": self.device_index_var.get().strip() or str(DEFAULT_DEVICE_INDEX),
-            "can_index": self.can_index_var.get().strip() or str(DEFAULT_CAN_INDEX),
             "source_address": self.source_address_var.get().strip() or f"0x{PREFERRED_SOURCE_ADDRESS:02X}",
             "window_geometry": self.geometry(),
             "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
@@ -802,5 +821,20 @@ class BmsMonitorApp(tk.Tk):
         super().destroy()
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Tkinter J1939 MASTERVOLT BMS monitor")
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help="print the startup window geometry and table column widths to stdout",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    BmsMonitorApp(export_layout=args.export).mainloop()
+
+
 if __name__ == "__main__":
-    BmsMonitorApp().mainloop()
+    main()
