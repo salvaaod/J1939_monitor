@@ -40,6 +40,7 @@ DEFAULT_DEVICE_INDEX = 0
 DEFAULT_CAN_INDEX = 0
 DEFAULT_DLL_NAME = "ECanVci.dll"
 DEFAULT_WINDOW_GEOMETRY = "480x570+99+79"
+DEFAULT_DISCOVERY_WINDOW_GEOMETRY = "760x300+120+120"
 SETTINGS_REGISTRY_PATH = r"Software\J1939BmsMonitor"
 SETTINGS_REGISTRY_VALUE = "Settings"
 SETTINGS_FILE_NAME = ".j1939_bms_monitor_settings.json"
@@ -77,6 +78,8 @@ PGN_ADDRESS_CLAIMED = 0x00EE00
 PGN_TP_CM = 0x00EC00
 PGN_TP_DT = 0x00EB00
 PGN_COMPONENT_IDENTIFICATION = 0x00FEEB
+ADDRESS_CLAIM_SCAN_SECONDS = 3.0
+
 
 # The two proprietary PGNs from the supplied matrix.  The example IDs are
 # 18FF00F3 and 18FF01F3, where F3 is the transmitting source address.
@@ -138,6 +141,26 @@ class ParsedId:
 
 
 @dataclass(frozen=True)
+class ClaimedDevice:
+    source_address: int
+    name: int
+    identity_number: int
+    manufacturer_code: int
+    function: int
+    last_seen: float
+
+
+@dataclass
+class TransportSession:
+    source_address: int
+    pgn: int
+    total_size: int
+    packet_count: int
+    chunks: dict[int, bytes]
+    started_at: float
+
+
+@dataclass(frozen=True)
 class SignalDefinition:
     pgn: int
     label: str
@@ -193,6 +216,14 @@ DEFAULT_SIGNAL_COLUMN_WIDTHS: dict[str, int] = {
     "raw": 68,
     "value": 66,
     "unit": 54,
+}
+DEFAULT_DEVICE_COLUMN_WIDTHS: dict[str, int] = {
+    "sa": 54,
+    "name": 148,
+    "manufacturer": 104,
+    "identity": 84,
+    "function": 70,
+    "last_seen": 88,
 }
 
 
@@ -372,6 +403,41 @@ def format_signal_value(definition: SignalDefinition, data: bytes) -> tuple[str,
     return format_scaled_value(scaled, definition), raw_text
 
 
+def decode_name(source_address: int, name: int, last_seen: float | None = None) -> ClaimedDevice:
+    return ClaimedDevice(
+        source_address=source_address,
+        name=name,
+        identity_number=name & 0x1FFFFF,
+        manufacturer_code=(name >> 21) & 0x7FF,
+        function=(name >> 40) & 0xFF,
+        last_seen=time.monotonic() if last_seen is None else last_seen,
+    )
+
+
+def format_claimed_device(device: ClaimedDevice) -> tuple[str, str, str, str, str, str]:
+    return (
+        f"0x{device.source_address:02X}",
+        f"0x{device.name:016X}",
+        str(device.manufacturer_code),
+        str(device.identity_number),
+        str(device.function),
+        time.strftime("%H:%M:%S"),
+    )
+
+
+def decode_component_identification(payload: bytes) -> str:
+    text = payload.rstrip(b"\xFF\x00").decode("ascii", errors="replace")
+    fields = [field.strip() for field in text.split("*") if field.strip()]
+    if not fields:
+        return text.strip() or "No component identification text returned"
+    labels = ("Make", "Model", "Serial", "Unit number")
+    lines = []
+    for index, field in enumerate(fields):
+        label = labels[index] if index < len(labels) else f"Field {index + 1}"
+        lines.append(f"{label}: {field}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # GCAN device wrapper
 # ---------------------------------------------------------------------------
@@ -488,6 +554,12 @@ class J1939Node:
             self.name.to_bytes(8, "little"),
         )
 
+    def send_request(self, requested_pgn: int, destination_address: int = GLOBAL_ADDRESS) -> None:
+        self.device.send(
+            j1939_id(PRIORITY_NETWORK_MANAGEMENT, PGN_REQUEST, self.source_address, destination_address),
+            bytes(pgn_to_bytes(requested_pgn)) + b"\xFF" * 5,
+        )
+
     def handle_frame(self, can_id: int, data: bytes) -> None:
         parsed = parse_j1939_id(can_id)
         if parsed.pgn == PGN_REQUEST:
@@ -548,13 +620,16 @@ class MonitorWorker(threading.Thread):
         config: DeviceConfig,
         source_address: int,
         event_queue: queue.Queue[tuple[str, object]],
+        command_queue: queue.Queue[tuple[str, object]],
         stop_event: threading.Event,
     ):
         super().__init__(daemon=True)
         self.config = config
         self.source_address = source_address
         self.event_queue = event_queue
+        self.command_queue = command_queue
         self.stop_event = stop_event
+        self.transport_sessions: dict[int, TransportSession] = {}
 
     def run(self) -> None:
         device: GCANDevice | None = None
@@ -565,9 +640,11 @@ class MonitorWorker(threading.Thread):
             node.send_address_claim()
             self.event_queue.put(("status", f"Connected, claimed source address 0x{node.source_address:02X}"))
             while not self.stop_event.is_set():
+                self._process_commands(node)
                 for can_id, data in device.receive():
                     node.handle_frame(can_id, data)
                     parsed = parse_j1939_id(can_id)
+                    self._handle_bus_discovery_frame(parsed, data)
                     if parsed.pgn in MONITORED_PGNS:
                         self.event_queue.put(("frame", (can_id, data, parsed)))
         except Exception as exc:  # noqa: BLE001 - worker must report all hardware/DLL failures to the UI
@@ -580,10 +657,171 @@ class MonitorWorker(threading.Thread):
                     pass
             self.event_queue.put(("stopped", None))
 
+    def _process_commands(self, node: J1939Node) -> None:
+        while True:
+            try:
+                command, payload = self.command_queue.get_nowait()
+            except queue.Empty:
+                break
+            if command == "query_address_claim":
+                self.transport_sessions.clear()
+                node.send_request(PGN_ADDRESS_CLAIMED, GLOBAL_ADDRESS)
+                self.event_queue.put(("status", f"Address-claim query sent from 0x{node.source_address:02X}"))
+            elif command == "request_component_info":
+                source_address = int(payload)
+                node.send_request(PGN_COMPONENT_IDENTIFICATION, source_address)
+                self.event_queue.put(("status", f"Requested Manufacturer & Device Information from 0x{source_address:02X}"))
+
+    def _handle_bus_discovery_frame(self, parsed: ParsedId, data: bytes) -> None:
+        if parsed.pgn == PGN_ADDRESS_CLAIMED and len(data) >= 8 and parsed.source_address != NULL_ADDRESS:
+            device = decode_name(parsed.source_address, int.from_bytes(data[:8], "little"))
+            self.event_queue.put(("device", device))
+        elif parsed.pgn == PGN_TP_CM:
+            self._handle_tp_cm(parsed, data)
+        elif parsed.pgn == PGN_TP_DT:
+            self._handle_tp_dt(parsed, data)
+
+    def _handle_tp_cm(self, parsed: ParsedId, data: bytes) -> None:
+        if len(data) < 8 or data[0] != 0x20:
+            return
+        target_pgn = int(data[5]) | (int(data[6]) << 8) | (int(data[7]) << 16)
+        if target_pgn != PGN_COMPONENT_IDENTIFICATION:
+            return
+        total_size = int(data[1]) | (int(data[2]) << 8)
+        packet_count = int(data[3])
+        self.transport_sessions[parsed.source_address] = TransportSession(
+            source_address=parsed.source_address,
+            pgn=target_pgn,
+            total_size=total_size,
+            packet_count=packet_count,
+            chunks={},
+            started_at=time.monotonic(),
+        )
+
+    def _handle_tp_dt(self, parsed: ParsedId, data: bytes) -> None:
+        if len(data) < 1:
+            return
+        session = self.transport_sessions.get(parsed.source_address)
+        if session is None:
+            return
+        sequence = int(data[0])
+        if sequence < 1 or sequence > session.packet_count:
+            return
+        session.chunks[sequence] = data[1:8]
+        if len(session.chunks) < session.packet_count:
+            return
+        payload = b"".join(session.chunks[index] for index in range(1, session.packet_count + 1))[: session.total_size]
+        self.transport_sessions.pop(parsed.source_address, None)
+        self.event_queue.put(("device_info", (parsed.source_address, decode_component_identification(payload))))
+
 
 # ---------------------------------------------------------------------------
 # Tkinter user interface
 # ---------------------------------------------------------------------------
+
+
+class DeviceInfoWindow(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, source_address: int, text: str):
+        super().__init__(parent)
+        self.title(f"Manufacturer & Device Information - 0x{source_address:02X}")
+        self.geometry("560x360+160+160")
+        self.transient(parent)
+
+        text_box = tk.Text(self, wrap="word", height=16, width=72)
+        scroll = ttk.Scrollbar(self, orient="vertical", command=text_box.yview)
+        text_box.configure(yscrollcommand=scroll.set)
+        text_box.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 10), pady=10)
+        close_button = ttk.Button(self, text="Close", command=self.destroy)
+        close_button.grid(row=1, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        text_box.insert("1.0", text)
+        text_box.configure(state="disabled")
+        close_button.focus_set()
+
+
+class DeviceDiscoveryWindow(tk.Toplevel):
+    def __init__(self, app: BmsMonitorApp):
+        super().__init__(app)
+        self.app = app
+        self.title("J1939 Bus Devices")
+        self.geometry(setting_as_str(app.settings, "device_window_geometry", DEFAULT_DISCOVERY_WINDOW_GEOMETRY))
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+        controls = ttk.Frame(self)
+        controls.pack(fill="x", padx=10, pady=(10, 4))
+        ttk.Button(controls, text="Query address claims", command=app.query_address_claims).pack(side="left")
+        ttk.Button(
+            controls,
+            text="Manufacturer & Device Information",
+            command=app.request_selected_device_info,
+        ).pack(side="left", padx=(8, 0))
+
+        self.status_var = tk.StringVar(value="Use Query address claims to discover devices on the bus.")
+        ttk.Label(self, textvariable=self.status_var).pack(fill="x", padx=10, pady=(0, 4))
+
+        table_frame = ttk.Frame(self)
+        table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.device_tree = ttk.Treeview(
+            table_frame,
+            columns=("sa", "name", "manufacturer", "identity", "function", "last_seen"),
+            show="headings",
+            height=8,
+        )
+        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.device_tree.yview)
+        self.device_tree.configure(yscrollcommand=scroll.set)
+        device_column_widths = merged_column_widths(app.settings.get("device_column_widths"), DEFAULT_DEVICE_COLUMN_WIDTHS)
+        for column, heading, width in (
+            ("sa", "SA", device_column_widths["sa"]),
+            ("name", "NAME", device_column_widths["name"]),
+            ("manufacturer", "Mfg Code", device_column_widths["manufacturer"]),
+            ("identity", "Identity", device_column_widths["identity"]),
+            ("function", "Function", device_column_widths["function"]),
+            ("last_seen", "Last seen", device_column_widths["last_seen"]),
+        ):
+            self.device_tree.heading(column, text=heading)
+            self.device_tree.column(column, width=width, anchor="w")
+        self.device_tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        self.device_tree.bind("<Double-1>", lambda _event: app.request_selected_device_info())
+
+        for device in app.devices.values():
+            self.update_device(device)
+
+    def clear_devices(self) -> None:
+        for item in self.device_tree.get_children():
+            self.device_tree.delete(item)
+
+    def selected_source_address(self) -> int | None:
+        selection = self.device_tree.selection()
+        if not selection:
+            return None
+        values = self.device_tree.item(selection[0], "values")
+        if not values:
+            return None
+        return int(str(values[0]), 0)
+
+    def set_status(self, text: str) -> None:
+        self.status_var.set(text)
+
+    def update_device(self, device: ClaimedDevice) -> None:
+        values = format_claimed_device(device)
+        row = self.app.device_rows.get(device.source_address)
+        if row and self.device_tree.exists(row):
+            self.device_tree.item(row, values=values)
+        else:
+            self.app.device_rows[device.source_address] = self.device_tree.insert("", "end", values=values)
+
+    def column_widths(self) -> dict[str, int]:
+        return {column: int(self.device_tree.column(column, "width")) for column in DEFAULT_DEVICE_COLUMN_WIDTHS}
+
+    def _close(self) -> None:
+        self.app.device_window = None
+        self.destroy()
 
 
 class BmsMonitorApp(tk.Tk):
@@ -595,6 +833,7 @@ class BmsMonitorApp(tk.Tk):
         self.geometry(setting_as_str(self.settings, "window_geometry", DEFAULT_WINDOW_GEOMETRY))
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.command_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_event = threading.Event()
         self.worker: MonitorWorker | None = None
         self.signal_rows: dict[str, str] = {}
@@ -603,12 +842,27 @@ class BmsMonitorApp(tk.Tk):
         self.pgn_rows: dict[int, str] = {}
         self.pgn_update_times: dict[int, float] = {}
         self.timed_out_pgns: set[int] = set()
+        self.device_rows: dict[int, str] = {}
+        self.devices: dict[int, ClaimedDevice] = {}
+        self.device_window: DeviceDiscoveryWindow | None = None
         self._build_ui()
         if export_layout:
             self._print_layout_export()
         self.after(100, self._poll_worker)
 
+    def _build_menu(self) -> None:
+        menu_bar = tk.Menu(self)
+        bus_menu = tk.Menu(menu_bar, tearoff=False)
+        bus_menu.add_command(label="Query devices with Address Claim", command=self.query_address_claims)
+        bus_menu.add_command(
+            label="Manufacturer & Device Information for selected device",
+            command=self.request_selected_device_info,
+        )
+        menu_bar.add_cascade(label="Bus", menu=bus_menu)
+        self.config(menu=menu_bar)
+
     def _build_ui(self) -> None:
+        self._build_menu()
         connection = ttk.LabelFrame(self, text="GCAN / USBCAN connection")
         connection.pack(fill="x", padx=10, pady=8)
 
@@ -666,6 +920,51 @@ class BmsMonitorApp(tk.Tk):
             )
             self.signal_rows[key] = item
 
+    def show_device_window(self) -> DeviceDiscoveryWindow:
+        if self.device_window is None or not self.device_window.winfo_exists():
+            self.device_rows.clear()
+            self.device_window = DeviceDiscoveryWindow(self)
+        else:
+            self.device_window.deiconify()
+            self.device_window.lift()
+            self.device_window.focus_set()
+        return self.device_window
+
+    def query_address_claims(self) -> None:
+        device_window = self.show_device_window()
+        if not self._worker_is_running():
+            messagebox.showinfo("Not connected", "Start monitoring before querying the J1939 bus.", parent=device_window)
+            return
+        self.devices.clear()
+        self.device_rows.clear()
+        device_window.clear_devices()
+        self.command_queue.put(("query_address_claim", None))
+        status = f"Collecting address claims for {ADDRESS_CLAIM_SCAN_SECONDS:.0f} seconds..."
+        self.status_var.set(status)
+        device_window.set_status(status)
+        self.after(int(ADDRESS_CLAIM_SCAN_SECONDS * 1000), self._finish_address_claim_query)
+
+    def request_selected_device_info(self) -> None:
+        device_window = self.show_device_window()
+        if not self._worker_is_running():
+            messagebox.showinfo("Not connected", "Start monitoring before requesting device information.", parent=device_window)
+            return
+        source_address = device_window.selected_source_address()
+        if source_address is None:
+            messagebox.showinfo("No device selected", "Select a discovered bus device first.", parent=device_window)
+            return
+        self.command_queue.put(("request_component_info", source_address))
+
+    def _worker_is_running(self) -> bool:
+        return self.worker is not None and self.worker.is_alive()
+
+    def _finish_address_claim_query(self) -> None:
+        if self.status_var.get().startswith("Collecting address claims"):
+            status = f"Found {len(self.devices)} device(s) from address claims"
+            self.status_var.set(status)
+            if self.device_window is not None and self.device_window.winfo_exists():
+                self.device_window.set_status(status)
+
     def start_monitoring(self) -> None:
         if self.worker and self.worker.is_alive():
             return
@@ -680,7 +979,7 @@ class BmsMonitorApp(tk.Tk):
         self.stop_event.clear()
         self._reset_pgn_rows()
         self._reset_signal_rows()
-        self.worker = MonitorWorker(config, source_address, self.event_queue, self.stop_event)
+        self.worker = MonitorWorker(config, source_address, self.event_queue, self.command_queue, self.stop_event)
         self.worker.start()
         self.start_button.configure(state="disabled")
         self.status_var.set("Connecting...")
@@ -697,12 +996,19 @@ class BmsMonitorApp(tk.Tk):
                 break
             if event == "status":
                 self.status_var.set(str(payload))
+                if self.device_window is not None and self.device_window.winfo_exists():
+                    self.device_window.set_status(str(payload))
             elif event == "error":
                 self.status_var.set(f"Error: {payload}")
                 messagebox.showerror("Monitoring error", str(payload))
             elif event == "frame":
                 can_id, data, parsed = payload  # type: ignore[misc]
                 self._update_frame(int(can_id), bytes(data), parsed)
+            elif event == "device":
+                self._update_device(payload)  # type: ignore[arg-type]
+            elif event == "device_info":
+                source_address, text = payload  # type: ignore[misc]
+                self._show_device_info(int(source_address), str(text))
             elif event == "stopped":
                 self.start_button.configure(state="normal")
                 if not self.stop_event.is_set() and not self.status_var.get().startswith("Error"):
@@ -712,6 +1018,29 @@ class BmsMonitorApp(tk.Tk):
         self._expire_stale_pgns()
         self._expire_stale_signals()
         self.after(100, self._poll_worker)
+
+    def _update_device(self, device: ClaimedDevice) -> None:
+        self.devices[device.source_address] = device
+        if self.device_window is not None and self.device_window.winfo_exists():
+            self.device_window.update_device(device)
+
+    def _show_device_info(self, source_address: int, text: str) -> None:
+        device = self.devices.get(source_address)
+        if device is not None:
+            text = (
+                f"Source address: 0x{source_address:02X}\n"
+                f"NAME: 0x{device.name:016X}\n"
+                f"Manufacturer code: {device.manufacturer_code}\n"
+                f"Identity number: {device.identity_number}\n"
+                f"Function: {device.function}\n\n"
+                f"{text}"
+            )
+        parent: tk.Misc = self.device_window if self.device_window is not None and self.device_window.winfo_exists() else self
+        DeviceInfoWindow(parent, source_address, text)
+        status = f"Received Manufacturer & Device Information from 0x{source_address:02X}"
+        self.status_var.set(status)
+        if self.device_window is not None and self.device_window.winfo_exists():
+            self.device_window.set_status(status)
 
     def _reset_pgn_rows(self) -> None:
         self.pgn_update_times.clear()
@@ -788,6 +1117,8 @@ class BmsMonitorApp(tk.Tk):
         return {
             "window_geometry": self.geometry(),
             "window_size": {"width": self.winfo_width(), "height": self.winfo_height()},
+            "device_window_geometry": self._device_window_geometry(),
+            "device_column_widths": self._device_column_widths(),
             "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
             "signal_column_widths": self._tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS),
         }
@@ -798,11 +1129,23 @@ class BmsMonitorApp(tk.Tk):
     def _tree_column_widths(self, tree: ttk.Treeview, columns: Iterable[str]) -> dict[str, int]:
         return {column: int(tree.column(column, "width")) for column in columns}
 
+    def _device_column_widths(self) -> dict[str, int]:
+        if self.device_window is not None and self.device_window.winfo_exists():
+            return self.device_window.column_widths()
+        return merged_column_widths(self.settings.get("device_column_widths"), DEFAULT_DEVICE_COLUMN_WIDTHS)
+
+    def _device_window_geometry(self) -> str:
+        if self.device_window is not None and self.device_window.winfo_exists():
+            return self.device_window.geometry()
+        return setting_as_str(self.settings, "device_window_geometry", DEFAULT_DISCOVERY_WINDOW_GEOMETRY)
+
     def _collect_settings(self) -> dict[str, Any]:
         self.update_idletasks()
         return {
             "source_address": self.source_address_var.get().strip() or f"0x{PREFERRED_SOURCE_ADDRESS:02X}",
             "window_geometry": self.geometry(),
+            "device_window_geometry": self._device_window_geometry(),
+            "device_column_widths": self._device_column_widths(),
             "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
             "signal_column_widths": self._tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS),
         }
