@@ -1,16 +1,16 @@
-# J1939 MASTERvOLT BMS Monitor
+# J1939 MASTERVOLT BMS Monitor
 
 A Windows desktop monitor for MASTERvOLT battery-management-system messages on a J1939 CAN bus. The application uses Tkinter for the UI and the GCAN / USBCAN Windows driver DLL (`ECanVci.dll`) through Python `ctypes`.
 
 ## Features
 
-- **GCAN / USBCAN adapter connection** with editable device type, device index, CAN channel index, and monitor source address. The CAN channel is always initialized for 500 kbps.
+- **GCAN / USBCAN adapter connection** with fixed adapter/channel defaults, an editable monitor source address, and 500 kbps CAN-channel initialization.
 - **Application-local DLL loading**: `ECanVci.dll` is always loaded internally from the same directory as the running script or bundled executable, with no operator DLL path field.
 - **J1939 29-bit extended-frame support** for receiving and transmitting classic 8-byte CAN frames.
 - **MASTERvOLT proprietary BMS PGN monitoring** for:
   - `0x00FF00`
   - `0x00FF01`
-- **Live raw frame display** showing PGN, CAN ID, payload bytes, and last-update time.
+- **Live raw frame display** showing PGN, CAN ID, payload bytes, and last-update time, with stale payloads replaced by `timeout` after 10 seconds without fresh data.
 - **Live decoded signal table** for pack voltage, pack current, pack temperature, remaining time, state of charge, and alarms, with per-signal timeout display after 10 seconds without fresh data.
 - **J1939 network-management participation** including address claim handling and responses to requests for address claim and component identification.
 - **Persistent operator settings** using the current-user Windows registry on Windows and a JSON file in the user home directory on non-Windows development systems.

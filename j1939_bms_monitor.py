@@ -588,7 +588,7 @@ class BmsMonitorApp(tk.Tk):
         super().__init__()
         self.settings_store = SettingsStore()
         self.settings = self.settings_store.load()
-        self.title("J1939 MASTERvOLT BMS Monitor")
+        self.title("J1939 MASTERVOLT BMS Monitor")
         self.geometry(setting_as_str(self.settings, "window_geometry", DEFAULT_WINDOW_GEOMETRY))
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -598,6 +598,8 @@ class BmsMonitorApp(tk.Tk):
         self.signal_update_times: dict[str, float] = {}
         self.timed_out_signals: set[str] = set()
         self.pgn_rows: dict[int, str] = {}
+        self.pgn_update_times: dict[int, float] = {}
+        self.timed_out_pgns: set[int] = set()
         self._build_ui()
         if export_layout:
             self._print_layout_export()
@@ -673,6 +675,7 @@ class BmsMonitorApp(tk.Tk):
             messagebox.showerror("Invalid configuration", str(exc))
             return
         self.stop_event.clear()
+        self._reset_pgn_rows()
         self._reset_signal_rows()
         self.worker = MonitorWorker(config, source_address, self.event_queue, self.stop_event)
         self.worker.start()
@@ -703,8 +706,15 @@ class BmsMonitorApp(tk.Tk):
                     self.status_var.set("Disconnected")
                 elif self.stop_event.is_set():
                     self.status_var.set("Stopped")
+        self._expire_stale_pgns()
         self._expire_stale_signals()
         self.after(100, self._poll_worker)
+
+    def _reset_pgn_rows(self) -> None:
+        self.pgn_update_times.clear()
+        self.timed_out_pgns.clear()
+        for pgn, row in self.pgn_rows.items():
+            self.pgn_tree.item(row, values=(f"0x{pgn:05X}", "-", "-", "never"))
 
     def _reset_signal_rows(self) -> None:
         self.signal_update_times.clear()
@@ -717,6 +727,17 @@ class BmsMonitorApp(tk.Tk):
                     row,
                     values=(f"0x{definition.pgn:05X}", definition.label, "-", NO_FRAME_TEXT, definition.unit),
                 )
+
+    def _expire_stale_pgns(self) -> None:
+        now = time.monotonic()
+        for pgn, row in self.pgn_rows.items():
+            updated_at = self.pgn_update_times.get(pgn)
+            if updated_at is None or pgn in self.timed_out_pgns:
+                continue
+            if now - updated_at <= SIGNAL_TIMEOUT_SECONDS:
+                continue
+            self.pgn_tree.item(row, values=(f"0x{pgn:05X}", "-", TIMEOUT_TEXT, TIMEOUT_TEXT))
+            self.timed_out_pgns.add(pgn)
 
     def _expire_stale_signals(self) -> None:
         now = time.monotonic()
@@ -737,12 +758,14 @@ class BmsMonitorApp(tk.Tk):
     def _update_frame(self, can_id: int, data: bytes, parsed: ParsedId) -> None:
         item = self.pgn_rows.get(parsed.pgn)
         timestamp = time.strftime("%H:%M:%S")
+        updated_at = time.monotonic()
         if item:
             self.pgn_tree.item(
                 item,
                 values=(f"0x{parsed.pgn:05X}", f"0x{can_id:08X}", bytes_hex(data), timestamp),
             )
-        updated_at = time.monotonic()
+            self.pgn_update_times[parsed.pgn] = updated_at
+            self.timed_out_pgns.discard(parsed.pgn)
         for definition in SIGNALS:
             if definition.pgn != parsed.pgn:
                 continue
@@ -796,7 +819,7 @@ class BmsMonitorApp(tk.Tk):
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Tkinter J1939 MASTERvOLT BMS monitor")
+    parser = argparse.ArgumentParser(description="Tkinter J1939 MASTERVOLT BMS monitor")
     parser.add_argument(
         "--export",
         action="store_true",
