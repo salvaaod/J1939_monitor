@@ -149,6 +149,7 @@ class SignalDefinition:
     unit: str = ""
     na_value: int | None = None
     value_map: dict[int, str] | None = None
+    decimal_places: int | None = None
 
     @property
     def start_bit_index(self) -> int:
@@ -162,7 +163,7 @@ SIGNALS: tuple[SignalDefinition, ...] = (
     SignalDefinition(PGN_PROP_00, "Battery pack net current", 2, 0, 16, 0.05, -1000.0, "A", 0xFFFF),
     SignalDefinition(PGN_PROP_00, "Battery pack temperature", 4, 0, 8, 1.0, -40.0, "deg C", 0xFF),
     SignalDefinition(PGN_PROP_01, "Remaining Time", 1, 0, 16, 1.0, 0.0, "minutes", 0xFFFF),
-    SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF),
+    SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF, decimal_places=1),
     SignalDefinition(PGN_PROP_01, "LowLevel Alarm", 0, 0, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
     SignalDefinition(PGN_PROP_01, "CriticalLow Alarm", 0, 1, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
     SignalDefinition(PGN_PROP_01, "Reserved Alarm 3", 0, 2, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
@@ -348,7 +349,9 @@ def format_raw_value(raw: int, bit_length: int) -> str:
 
 
 def format_scaled_value(value: float, definition: SignalDefinition) -> str:
-    if definition.factor < 0.01:
+    if definition.decimal_places is not None:
+        text = f"{abs(value):.{definition.decimal_places}f}"
+    elif definition.factor < 0.01:
         text = f"{abs(value):.3f}"
     elif definition.factor < 1:
         text = f"{abs(value):.2f}"
