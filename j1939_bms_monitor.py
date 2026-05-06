@@ -12,13 +12,19 @@ Run on Windows with the GCAN driver and ECanVci.dll available::
 from __future__ import annotations
 
 import ctypes
+import json
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
+from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Iterable
+from typing import Any, Iterable
+
+if sys.platform == "win32":
+    import winreg
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +37,10 @@ DEFAULT_DEVICE_TYPE = USBCAN_II
 DEFAULT_DEVICE_INDEX = 0
 DEFAULT_CAN_INDEX = 0
 DEFAULT_DLL_NAME = "ECanVci.dll"
+DEFAULT_WINDOW_GEOMETRY = "1180x720"
+SETTINGS_REGISTRY_PATH = r"Software\J1939BmsMonitor"
+SETTINGS_REGISTRY_VALUE = "Settings"
+SETTINGS_FILE_NAME = ".j1939_bms_monitor_settings.json"
 
 TIMING0_250K = 0x01
 TIMING1_250K = 0x1C
@@ -145,6 +155,111 @@ SIGNALS: tuple[SignalDefinition, ...] = (
     SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF),
 )
 
+
+
+# ---------------------------------------------------------------------------
+# Persistent application settings
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_PGN_COLUMN_WIDTHS: dict[str, int] = {
+    "pgn": 110,
+    "can_id": 120,
+    "source": 80,
+    "payload": 360,
+    "age": 160,
+}
+DEFAULT_SIGNAL_COLUMN_WIDTHS: dict[str, int] = {
+    "pgn": 110,
+    "signal": 280,
+    "raw": 100,
+    "value": 200,
+    "unit": 80,
+}
+
+
+class SettingsStore:
+    """Persist operator-adjustable UI and connection settings.
+
+    Windows builds store the JSON payload in the current user's registry.  A
+    small JSON file is used on other platforms so the app remains runnable for
+    development and tests outside Windows.
+    """
+
+    def load(self) -> dict[str, Any]:
+        if sys.platform == "win32":
+            return self._load_from_registry()
+        return self._load_from_file()
+
+    def save(self, settings: dict[str, Any]) -> None:
+        if sys.platform == "win32":
+            self._save_to_registry(settings)
+        else:
+            self._save_to_file(settings)
+
+    def _load_from_registry(self) -> dict[str, Any]:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH) as key:
+                payload, _value_type = winreg.QueryValueEx(key, SETTINGS_REGISTRY_VALUE)
+        except OSError:
+            return {}
+        return self._parse_payload(payload)
+
+    def _save_to_registry(self, settings: dict[str, Any]) -> None:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH) as key:
+            winreg.SetValueEx(key, SETTINGS_REGISTRY_VALUE, 0, winreg.REG_SZ, json.dumps(settings, sort_keys=True))
+
+    def _load_from_file(self) -> dict[str, Any]:
+        settings_path = Path.home() / SETTINGS_FILE_NAME
+        try:
+            payload = settings_path.read_text(encoding="utf-8")
+        except OSError:
+            return {}
+        return self._parse_payload(payload)
+
+    def _save_to_file(self, settings: dict[str, Any]) -> None:
+        settings_path = Path.home() / SETTINGS_FILE_NAME
+        settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
+
+    @staticmethod
+    def _parse_payload(payload: object) -> dict[str, Any]:
+        if not isinstance(payload, str):
+            return {}
+        try:
+            settings = json.loads(payload)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(settings, dict):
+            return settings
+        return {}
+
+
+def merged_column_widths(saved_widths: object, default_widths: dict[str, int]) -> dict[str, int]:
+    widths = dict(default_widths)
+    if not isinstance(saved_widths, dict):
+        return widths
+    for column in default_widths:
+        try:
+            width = int(saved_widths[column])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if width > 0:
+            widths[column] = width
+    return widths
+
+
+def setting_as_entry_value(settings: dict[str, Any], key: str, default: object) -> str:
+    value = settings.get(key, default)
+    if value is None:
+        return str(default)
+    return str(value)
+
+
+def setting_as_str(settings: dict[str, Any], key: str, default: str) -> str:
+    value = settings.get(key, default)
+    if isinstance(value, str) and value:
+        return value
+    return default
 
 # ---------------------------------------------------------------------------
 # J1939 helpers
@@ -449,8 +564,11 @@ class MonitorWorker(threading.Thread):
 class BmsMonitorApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.settings_store = SettingsStore()
+        self.settings = self.settings_store.load()
         self.title("J1939 MASTERvOLT BMS Monitor")
-        self.geometry("1180x720")
+        self.geometry(setting_as_str(self.settings, "window_geometry", DEFAULT_WINDOW_GEOMETRY))
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_event = threading.Event()
         self.worker: MonitorWorker | None = None
@@ -463,13 +581,15 @@ class BmsMonitorApp(tk.Tk):
         connection = ttk.LabelFrame(self, text="GCAN / USBCAN connection")
         connection.pack(fill="x", padx=10, pady=8)
 
-        self.dll_var = tk.StringVar(value=DEFAULT_DLL_NAME)
-        self.device_type_var = tk.IntVar(value=DEFAULT_DEVICE_TYPE)
-        self.device_index_var = tk.IntVar(value=DEFAULT_DEVICE_INDEX)
-        self.can_index_var = tk.IntVar(value=DEFAULT_CAN_INDEX)
-        self.source_address_var = tk.StringVar(value=f"0x{PREFERRED_SOURCE_ADDRESS:02X}")
-        self.timing0_var = tk.StringVar(value=f"0x{TIMING0_500K:02X}")
-        self.timing1_var = tk.StringVar(value=f"0x{TIMING1_500K:02X}")
+        self.dll_var = tk.StringVar(value=setting_as_str(self.settings, "dll_path", DEFAULT_DLL_NAME))
+        self.device_type_var = tk.StringVar(value=setting_as_entry_value(self.settings, "device_type", DEFAULT_DEVICE_TYPE))
+        self.device_index_var = tk.StringVar(value=setting_as_entry_value(self.settings, "device_index", DEFAULT_DEVICE_INDEX))
+        self.can_index_var = tk.StringVar(value=setting_as_entry_value(self.settings, "can_index", DEFAULT_CAN_INDEX))
+        self.source_address_var = tk.StringVar(
+            value=setting_as_str(self.settings, "source_address", f"0x{PREFERRED_SOURCE_ADDRESS:02X}")
+        )
+        self.timing0_var = tk.StringVar(value=setting_as_str(self.settings, "timing0", f"0x{TIMING0_500K:02X}"))
+        self.timing1_var = tk.StringVar(value=setting_as_str(self.settings, "timing1", f"0x{TIMING1_500K:02X}"))
         self.status_var = tk.StringVar(value="Disconnected")
 
         fields = (
@@ -494,12 +614,13 @@ class BmsMonitorApp(tk.Tk):
         pgn_frame = ttk.LabelFrame(self, text="Current monitored PGN frames")
         pgn_frame.pack(fill="x", padx=10, pady=6)
         self.pgn_tree = ttk.Treeview(pgn_frame, columns=("pgn", "can_id", "source", "payload", "age"), show="headings", height=3)
+        pgn_column_widths = merged_column_widths(self.settings.get("pgn_column_widths"), DEFAULT_PGN_COLUMN_WIDTHS)
         for column, heading, width in (
-            ("pgn", "PGN", 110),
-            ("can_id", "CAN ID", 120),
-            ("source", "Source", 80),
-            ("payload", "Payload (hex)", 360),
-            ("age", "Last update", 160),
+            ("pgn", "PGN", pgn_column_widths["pgn"]),
+            ("can_id", "CAN ID", pgn_column_widths["can_id"]),
+            ("source", "Source", pgn_column_widths["source"]),
+            ("payload", "Payload (hex)", pgn_column_widths["payload"]),
+            ("age", "Last update", pgn_column_widths["age"]),
         ):
             self.pgn_tree.heading(column, text=heading)
             self.pgn_tree.column(column, width=width, anchor="w")
@@ -511,12 +632,13 @@ class BmsMonitorApp(tk.Tk):
         signals_frame = ttk.LabelFrame(self, text="Decoded signal values")
         signals_frame.pack(fill="both", expand=True, padx=10, pady=6)
         self.signal_tree = ttk.Treeview(signals_frame, columns=("pgn", "signal", "raw", "value", "unit"), show="headings")
+        signal_column_widths = merged_column_widths(self.settings.get("signal_column_widths"), DEFAULT_SIGNAL_COLUMN_WIDTHS)
         for column, heading, width in (
-            ("pgn", "PGN", 110),
-            ("signal", "Signal", 280),
-            ("raw", "Raw", 100),
-            ("value", "Value", 200),
-            ("unit", "Units", 80),
+            ("pgn", "PGN", signal_column_widths["pgn"]),
+            ("signal", "Signal", signal_column_widths["signal"]),
+            ("raw", "Raw", signal_column_widths["raw"]),
+            ("value", "Value", signal_column_widths["value"]),
+            ("unit", "Units", signal_column_widths["unit"]),
         ):
             self.signal_tree.heading(column, text=heading)
             self.signal_tree.column(column, width=width, anchor="w")
@@ -602,8 +724,35 @@ class BmsMonitorApp(tk.Tk):
     def _signal_key(definition: SignalDefinition) -> str:
         return f"{definition.pgn:05X}:{definition.label}"
 
+    def _tree_column_widths(self, tree: ttk.Treeview, columns: Iterable[str]) -> dict[str, int]:
+        return {column: int(tree.column(column, "width")) for column in columns}
+
+    def _collect_settings(self) -> dict[str, Any]:
+        self.update_idletasks()
+        return {
+            "dll_path": self.dll_var.get().strip() or DEFAULT_DLL_NAME,
+            "device_type": self.device_type_var.get().strip() or str(DEFAULT_DEVICE_TYPE),
+            "device_index": self.device_index_var.get().strip() or str(DEFAULT_DEVICE_INDEX),
+            "can_index": self.can_index_var.get().strip() or str(DEFAULT_CAN_INDEX),
+            "timing0": self.timing0_var.get().strip() or f"0x{TIMING0_500K:02X}",
+            "timing1": self.timing1_var.get().strip() or f"0x{TIMING1_500K:02X}",
+            "source_address": self.source_address_var.get().strip() or f"0x{PREFERRED_SOURCE_ADDRESS:02X}",
+            "window_geometry": self.geometry(),
+            "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
+            "signal_column_widths": self._tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS),
+        }
+
+    def _save_settings(self) -> None:
+        try:
+            self.settings_store.save(self._collect_settings())
+        except OSError:
+            # Closing the monitor should not be blocked by a registry or file
+            # permission problem.  Settings will fall back to defaults next run.
+            pass
+
     def destroy(self) -> None:
         self.stop_event.set()
+        self._save_settings()
         super().destroy()
 
 
