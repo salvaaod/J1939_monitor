@@ -39,7 +39,8 @@ DEFAULT_DEVICE_TYPE = USBCAN_II
 DEFAULT_DEVICE_INDEX = 0
 DEFAULT_CAN_INDEX = 0
 DEFAULT_DLL_NAME = "ECanVci.dll"
-DEFAULT_WINDOW_GEOMETRY = "760x720+99+79"
+DEFAULT_WINDOW_GEOMETRY = "480x570+99+79"
+DEFAULT_DISCOVERY_WINDOW_GEOMETRY = "760x300+120+120"
 SETTINGS_REGISTRY_PATH = r"Software\J1939BmsMonitor"
 SETTINGS_REGISTRY_VALUE = "Settings"
 SETTINGS_FILE_NAME = ".j1939_bms_monitor_settings.json"
@@ -719,6 +720,110 @@ class MonitorWorker(threading.Thread):
 # ---------------------------------------------------------------------------
 
 
+class DeviceInfoWindow(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, source_address: int, text: str):
+        super().__init__(parent)
+        self.title(f"Manufacturer & Device Information - 0x{source_address:02X}")
+        self.geometry("560x360+160+160")
+        self.transient(parent)
+
+        text_box = tk.Text(self, wrap="word", height=16, width=72)
+        scroll = ttk.Scrollbar(self, orient="vertical", command=text_box.yview)
+        text_box.configure(yscrollcommand=scroll.set)
+        text_box.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        scroll.grid(row=0, column=1, sticky="ns", padx=(0, 10), pady=10)
+        close_button = ttk.Button(self, text="Close", command=self.destroy)
+        close_button.grid(row=1, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        text_box.insert("1.0", text)
+        text_box.configure(state="disabled")
+        close_button.focus_set()
+
+
+class DeviceDiscoveryWindow(tk.Toplevel):
+    def __init__(self, app: BmsMonitorApp):
+        super().__init__(app)
+        self.app = app
+        self.title("J1939 Bus Devices")
+        self.geometry(setting_as_str(app.settings, "device_window_geometry", DEFAULT_DISCOVERY_WINDOW_GEOMETRY))
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+        controls = ttk.Frame(self)
+        controls.pack(fill="x", padx=10, pady=(10, 4))
+        ttk.Button(controls, text="Query address claims", command=app.query_address_claims).pack(side="left")
+        ttk.Button(
+            controls,
+            text="Manufacturer & Device Information",
+            command=app.request_selected_device_info,
+        ).pack(side="left", padx=(8, 0))
+
+        self.status_var = tk.StringVar(value="Use Query address claims to discover devices on the bus.")
+        ttk.Label(self, textvariable=self.status_var).pack(fill="x", padx=10, pady=(0, 4))
+
+        table_frame = ttk.Frame(self)
+        table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.device_tree = ttk.Treeview(
+            table_frame,
+            columns=("sa", "name", "manufacturer", "identity", "function", "last_seen"),
+            show="headings",
+            height=8,
+        )
+        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.device_tree.yview)
+        self.device_tree.configure(yscrollcommand=scroll.set)
+        device_column_widths = merged_column_widths(app.settings.get("device_column_widths"), DEFAULT_DEVICE_COLUMN_WIDTHS)
+        for column, heading, width in (
+            ("sa", "SA", device_column_widths["sa"]),
+            ("name", "NAME", device_column_widths["name"]),
+            ("manufacturer", "Mfg Code", device_column_widths["manufacturer"]),
+            ("identity", "Identity", device_column_widths["identity"]),
+            ("function", "Function", device_column_widths["function"]),
+            ("last_seen", "Last seen", device_column_widths["last_seen"]),
+        ):
+            self.device_tree.heading(column, text=heading)
+            self.device_tree.column(column, width=width, anchor="w")
+        self.device_tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        self.device_tree.bind("<Double-1>", lambda _event: app.request_selected_device_info())
+
+        for device in app.devices.values():
+            self.update_device(device)
+
+    def clear_devices(self) -> None:
+        for item in self.device_tree.get_children():
+            self.device_tree.delete(item)
+
+    def selected_source_address(self) -> int | None:
+        selection = self.device_tree.selection()
+        if not selection:
+            return None
+        values = self.device_tree.item(selection[0], "values")
+        if not values:
+            return None
+        return int(str(values[0]), 0)
+
+    def set_status(self, text: str) -> None:
+        self.status_var.set(text)
+
+    def update_device(self, device: ClaimedDevice) -> None:
+        values = format_claimed_device(device)
+        row = self.app.device_rows.get(device.source_address)
+        if row and self.device_tree.exists(row):
+            self.device_tree.item(row, values=values)
+        else:
+            self.app.device_rows[device.source_address] = self.device_tree.insert("", "end", values=values)
+
+    def column_widths(self) -> dict[str, int]:
+        return {column: int(self.device_tree.column(column, "width")) for column in DEFAULT_DEVICE_COLUMN_WIDTHS}
+
+    def _close(self) -> None:
+        self.app.device_window = None
+        self.destroy()
+
+
 class BmsMonitorApp(tk.Tk):
     def __init__(self, export_layout: bool = False):
         super().__init__()
@@ -739,6 +844,7 @@ class BmsMonitorApp(tk.Tk):
         self.timed_out_pgns: set[int] = set()
         self.device_rows: dict[int, str] = {}
         self.devices: dict[int, ClaimedDevice] = {}
+        self.device_window: DeviceDiscoveryWindow | None = None
         self._build_ui()
         if export_layout:
             self._print_layout_export()
@@ -773,40 +879,6 @@ class BmsMonitorApp(tk.Tk):
         )
         ttk.Label(connection, textvariable=self.status_var).grid(row=0, column=3, sticky="w", padx=8, pady=6)
         connection.columnconfigure(3, weight=1)
-
-        devices_frame = ttk.LabelFrame(self, text="Discovered bus devices")
-        devices_frame.pack(fill="x", padx=10, pady=6)
-        device_buttons = ttk.Frame(devices_frame)
-        device_buttons.pack(fill="x", padx=8, pady=(8, 0))
-        self.query_devices_button = ttk.Button(
-            device_buttons, text="Query address claims", command=self.query_address_claims
-        )
-        self.query_devices_button.pack(side="left")
-        self.device_info_button = ttk.Button(
-            device_buttons, text="Manufacturer & Device Information", command=self.request_selected_device_info
-        )
-        self.device_info_button.pack(side="left", padx=(8, 0))
-        self.device_tree = ttk.Treeview(
-            devices_frame,
-            columns=("sa", "name", "manufacturer", "identity", "function", "last_seen"),
-            show="headings",
-            height=5,
-        )
-        device_column_widths = merged_column_widths(
-            self.settings.get("device_column_widths"), DEFAULT_DEVICE_COLUMN_WIDTHS
-        )
-        for column, heading, width in (
-            ("sa", "SA", device_column_widths["sa"]),
-            ("name", "NAME", device_column_widths["name"]),
-            ("manufacturer", "Mfg Code", device_column_widths["manufacturer"]),
-            ("identity", "Identity", device_column_widths["identity"]),
-            ("function", "Function", device_column_widths["function"]),
-            ("last_seen", "Last seen", device_column_widths["last_seen"]),
-        ):
-            self.device_tree.heading(column, text=heading)
-            self.device_tree.column(column, width=width, anchor="w")
-        self.device_tree.pack(fill="x", padx=8, pady=8)
-        self.device_tree.bind("<Double-1>", lambda _event: self.request_selected_device_info())
 
         pgn_frame = ttk.LabelFrame(self, text="Current monitored PGN frames")
         pgn_frame.pack(fill="x", padx=10, pady=6)
@@ -848,30 +920,39 @@ class BmsMonitorApp(tk.Tk):
             )
             self.signal_rows[key] = item
 
+    def show_device_window(self) -> DeviceDiscoveryWindow:
+        if self.device_window is None or not self.device_window.winfo_exists():
+            self.device_rows.clear()
+            self.device_window = DeviceDiscoveryWindow(self)
+        else:
+            self.device_window.deiconify()
+            self.device_window.lift()
+            self.device_window.focus_set()
+        return self.device_window
+
     def query_address_claims(self) -> None:
+        device_window = self.show_device_window()
         if not self._worker_is_running():
-            messagebox.showinfo("Not connected", "Start monitoring before querying the J1939 bus.")
+            messagebox.showinfo("Not connected", "Start monitoring before querying the J1939 bus.", parent=device_window)
             return
         self.devices.clear()
         self.device_rows.clear()
-        for item in self.device_tree.get_children():
-            self.device_tree.delete(item)
+        device_window.clear_devices()
         self.command_queue.put(("query_address_claim", None))
-        self.status_var.set(f"Collecting address claims for {ADDRESS_CLAIM_SCAN_SECONDS:.0f} seconds...")
+        status = f"Collecting address claims for {ADDRESS_CLAIM_SCAN_SECONDS:.0f} seconds..."
+        self.status_var.set(status)
+        device_window.set_status(status)
         self.after(int(ADDRESS_CLAIM_SCAN_SECONDS * 1000), self._finish_address_claim_query)
 
     def request_selected_device_info(self) -> None:
+        device_window = self.show_device_window()
         if not self._worker_is_running():
-            messagebox.showinfo("Not connected", "Start monitoring before requesting device information.")
+            messagebox.showinfo("Not connected", "Start monitoring before requesting device information.", parent=device_window)
             return
-        selection = self.device_tree.selection()
-        if not selection:
-            messagebox.showinfo("No device selected", "Select a discovered bus device first.")
+        source_address = device_window.selected_source_address()
+        if source_address is None:
+            messagebox.showinfo("No device selected", "Select a discovered bus device first.", parent=device_window)
             return
-        values = self.device_tree.item(selection[0], "values")
-        if not values:
-            return
-        source_address = int(str(values[0]), 0)
         self.command_queue.put(("request_component_info", source_address))
 
     def _worker_is_running(self) -> bool:
@@ -879,7 +960,10 @@ class BmsMonitorApp(tk.Tk):
 
     def _finish_address_claim_query(self) -> None:
         if self.status_var.get().startswith("Collecting address claims"):
-            self.status_var.set(f"Found {len(self.devices)} device(s) from address claims")
+            status = f"Found {len(self.devices)} device(s) from address claims"
+            self.status_var.set(status)
+            if self.device_window is not None and self.device_window.winfo_exists():
+                self.device_window.set_status(status)
 
     def start_monitoring(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -912,6 +996,8 @@ class BmsMonitorApp(tk.Tk):
                 break
             if event == "status":
                 self.status_var.set(str(payload))
+                if self.device_window is not None and self.device_window.winfo_exists():
+                    self.device_window.set_status(str(payload))
             elif event == "error":
                 self.status_var.set(f"Error: {payload}")
                 messagebox.showerror("Monitoring error", str(payload))
@@ -935,16 +1021,11 @@ class BmsMonitorApp(tk.Tk):
 
     def _update_device(self, device: ClaimedDevice) -> None:
         self.devices[device.source_address] = device
-        values = format_claimed_device(device)
-        row = self.device_rows.get(device.source_address)
-        if row:
-            self.device_tree.item(row, values=values)
-        else:
-            self.device_rows[device.source_address] = self.device_tree.insert("", "end", values=values)
+        if self.device_window is not None and self.device_window.winfo_exists():
+            self.device_window.update_device(device)
 
     def _show_device_info(self, source_address: int, text: str) -> None:
         device = self.devices.get(source_address)
-        title = f"Manufacturer & Device Information - 0x{source_address:02X}"
         if device is not None:
             text = (
                 f"Source address: 0x{source_address:02X}\n"
@@ -954,8 +1035,12 @@ class BmsMonitorApp(tk.Tk):
                 f"Function: {device.function}\n\n"
                 f"{text}"
             )
-        messagebox.showinfo(title, text)
-        self.status_var.set(f"Received Manufacturer & Device Information from 0x{source_address:02X}")
+        parent: tk.Misc = self.device_window if self.device_window is not None and self.device_window.winfo_exists() else self
+        DeviceInfoWindow(parent, source_address, text)
+        status = f"Received Manufacturer & Device Information from 0x{source_address:02X}"
+        self.status_var.set(status)
+        if self.device_window is not None and self.device_window.winfo_exists():
+            self.device_window.set_status(status)
 
     def _reset_pgn_rows(self) -> None:
         self.pgn_update_times.clear()
@@ -1032,7 +1117,8 @@ class BmsMonitorApp(tk.Tk):
         return {
             "window_geometry": self.geometry(),
             "window_size": {"width": self.winfo_width(), "height": self.winfo_height()},
-            "device_column_widths": self._tree_column_widths(self.device_tree, DEFAULT_DEVICE_COLUMN_WIDTHS),
+            "device_window_geometry": self._device_window_geometry(),
+            "device_column_widths": self._device_column_widths(),
             "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
             "signal_column_widths": self._tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS),
         }
@@ -1043,12 +1129,23 @@ class BmsMonitorApp(tk.Tk):
     def _tree_column_widths(self, tree: ttk.Treeview, columns: Iterable[str]) -> dict[str, int]:
         return {column: int(tree.column(column, "width")) for column in columns}
 
+    def _device_column_widths(self) -> dict[str, int]:
+        if self.device_window is not None and self.device_window.winfo_exists():
+            return self.device_window.column_widths()
+        return merged_column_widths(self.settings.get("device_column_widths"), DEFAULT_DEVICE_COLUMN_WIDTHS)
+
+    def _device_window_geometry(self) -> str:
+        if self.device_window is not None and self.device_window.winfo_exists():
+            return self.device_window.geometry()
+        return setting_as_str(self.settings, "device_window_geometry", DEFAULT_DISCOVERY_WINDOW_GEOMETRY)
+
     def _collect_settings(self) -> dict[str, Any]:
         self.update_idletasks()
         return {
             "source_address": self.source_address_var.get().strip() or f"0x{PREFERRED_SOURCE_ADDRESS:02X}",
             "window_geometry": self.geometry(),
-            "device_column_widths": self._tree_column_widths(self.device_tree, DEFAULT_DEVICE_COLUMN_WIDTHS),
+            "device_window_geometry": self._device_window_geometry(),
+            "device_column_widths": self._device_column_widths(),
             "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
             "signal_column_widths": self._tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS),
         }
