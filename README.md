@@ -5,7 +5,7 @@ A Windows desktop monitor for MASTERvOLT battery-management-system messages on a
 ## Features
 
 - **GCAN / USBCAN adapter connection** with editable device type, device index, CAN channel index, baud-rate timing bytes, and monitor source address.
-- **Application-local DLL loading**: relative DLL names are resolved beside the running script or bundled executable, so `ECanVci.dll` should be placed in the same directory as the app.
+- **Application-local DLL loading**: `ECanVci.dll` is always loaded internally from the same directory as the running script or bundled executable, with no operator DLL path field.
 - **J1939 29-bit extended-frame support** for receiving and transmitting classic 8-byte CAN frames.
 - **MASTERvOLT proprietary BMS PGN monitoring** for:
   - `0x00FF00` / `PropB_00`
@@ -61,7 +61,7 @@ J1939_monitor/
 └── README.md
 ```
 
-The default DLL field resolves to this application-local path. If a relative DLL name is entered in the UI, the code resolves it relative to the running script or bundled executable directory. Absolute DLL paths are still accepted for troubleshooting or custom installations.
+The DLL path is intentionally not shown or edited in the UI. The application always uses the `ECanVci.dll` file located beside `j1939_bms_monitor.py` or beside the packaged executable.
 
 ## Running the Application
 
@@ -77,7 +77,6 @@ Then verify the connection settings in the top panel and click **Start monitorin
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| DLL | `ECanVci.dll` beside the app | GCAN Windows interface DLL |
 | Device type | `4` | GCAN `USBCAN-II` |
 | Device index | `0` | First connected adapter |
 | CAN index | `0` | First CAN channel |
@@ -93,7 +92,7 @@ The application is contained in `j1939_bms_monitor.py` and is organized into the
 
 ### Constants and DLL path helpers
 
-The top of the file defines GCAN device defaults, baud-rate timing bytes, and J1939 PGNs. The helper functions `app_directory()`, `default_dll_path()`, and `resolve_dll_path()` ensure the app loads `ECanVci.dll` from the same directory as the running script or packaged executable when a relative DLL path is used.
+The top of the file defines GCAN device defaults, baud-rate timing bytes, and J1939 PGNs. The helper functions `app_directory()` and `default_dll_path()` keep DLL loading internal and always point to `ECanVci.dll` in the same directory as the running script or packaged executable.
 
 ### GCAN structures
 
@@ -101,7 +100,7 @@ The top of the file defines GCAN device defaults, baud-rate timing bytes, and J1
 
 ### Configuration and signal definitions
 
-`DeviceConfig` stores DLL, adapter, channel, and CAN timing settings. `SignalDefinition` describes each decoded BMS signal: PGN, label, byte/bit position, bit length, scaling factor, offset, engineering unit, and optional not-available or enumerated values.
+`DeviceConfig` stores adapter, channel, and CAN timing settings. `SignalDefinition` describes each decoded BMS signal: PGN, label, byte/bit position, bit length, scaling factor, offset, engineering unit, and optional not-available or enumerated values.
 
 The `SIGNALS` tuple contains the decode matrix for the two monitored proprietary PGNs.
 
