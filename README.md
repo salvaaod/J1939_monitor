@@ -4,14 +4,14 @@ A Windows desktop monitor for MASTERvOLT battery-management-system messages on a
 
 ## Features
 
-- **GCAN / USBCAN adapter connection** with editable device type, device index, CAN channel index, baud-rate timing bytes, and monitor source address.
+- **GCAN / USBCAN adapter connection** with editable device type, device index, CAN channel index, and monitor source address. The CAN channel is always initialized for 500 kbps.
 - **Application-local DLL loading**: `ECanVci.dll` is always loaded internally from the same directory as the running script or bundled executable, with no operator DLL path field.
 - **J1939 29-bit extended-frame support** for receiving and transmitting classic 8-byte CAN frames.
 - **MASTERvOLT proprietary BMS PGN monitoring** for:
-  - `0x00FF00` / `PropB_00`
-  - `0x00FF01` / `PropB_01`
-- **Live raw frame display** showing PGN, CAN ID, source address, payload bytes, and last-update time.
-- **Live decoded signal table** for pack voltage, pack current, pack temperature, alarms, remaining time, and state of charge.
+  - `0x00FF00`
+  - `0x00FF01`
+- **Live raw frame display** showing PGN, CAN ID, payload bytes, and last-update time.
+- **Live decoded signal table** for pack voltage, pack current, pack temperature, remaining time, state of charge, and alarms, with per-signal timeout display after 10 seconds without fresh data.
 - **J1939 network-management participation** including address claim handling and responses to requests for address claim and component identification.
 - **Persistent operator settings** using the current-user Windows registry on Windows and a JSON file in the user home directory on non-Windows development systems.
 
@@ -80,11 +80,9 @@ Then verify the connection settings in the top panel and click **Start monitorin
 | Device type | `4` | GCAN `USBCAN-II` |
 | Device index | `0` | First connected adapter |
 | CAN index | `0` | First CAN channel |
-| Timing0 | `0x00` | GCAN timing byte for 500 kbps |
-| Timing1 | `0x1C` | GCAN timing byte for 500 kbps |
 | Monitor SA | `0x80` | Preferred J1939 source address for this monitor |
 
-The supplied MASTERvOLT matrix expects 500 kbps. If your bus is configured differently, update the timing bytes before starting the monitor.
+The supplied MASTERvOLT matrix expects 500 kbps, so the monitor always uses the GCAN 500 kbps timing bytes (`Timing0 = 0x00`, `Timing1 = 0x1C`).
 
 ## Code Overview
 
@@ -92,7 +90,7 @@ The application is contained in `j1939_bms_monitor.py` and is organized into the
 
 ### Constants and DLL path helpers
 
-The top of the file defines GCAN device defaults, baud-rate timing bytes, and J1939 PGNs. The helper functions `app_directory()` and `default_dll_path()` keep DLL loading internal and always point to `ECanVci.dll` in the same directory as the running script or packaged executable.
+The top of the file defines GCAN device defaults, fixed 500 kbps timing bytes, and J1939 PGNs. The helper functions `app_directory()` and `default_dll_path()` keep DLL loading internal and always point to `ECanVci.dll` in the same directory as the running script or packaged executable.
 
 ### GCAN structures
 
@@ -100,7 +98,7 @@ The top of the file defines GCAN device defaults, baud-rate timing bytes, and J1
 
 ### Configuration and signal definitions
 
-`DeviceConfig` stores adapter, channel, and CAN timing settings. `SignalDefinition` describes each decoded BMS signal: PGN, label, byte/bit position, bit length, scaling factor, offset, engineering unit, and optional not-available or enumerated values.
+`DeviceConfig` stores adapter and channel settings while keeping the CAN timing fixed at 500 kbps. `SignalDefinition` describes each decoded BMS signal: PGN, label, byte/bit position, bit length, scaling factor, offset, engineering unit, and optional not-available or enumerated values.
 
 The `SIGNALS` tuple contains the decode matrix for the two monitored proprietary PGNs.
 
@@ -161,15 +159,15 @@ Transmit and receive paths set and expect 29-bit extended CAN frames, which J193
 | `0x00FF00` | Battery pack voltage | raw × 0.05 | V |
 | `0x00FF00` | Battery pack net current | raw × 0.05 − 1000 | A |
 | `0x00FF00` | Battery pack temperature | raw − 40 | deg C |
-| `0x00FF01` | LowLevel Alarm | `0` = No Alarm, `1` = Low Level alarm | |
-| `0x00FF01` | CriticalLow Alarm | `0` = No Alarm, `1` = Critical Level alarm | |
-| `0x00FF01` | Reserved Alarm 3-8 | `0` = No Alarm, `1` = Alarm | |
-| `0x00FF01` | Remaining Time | raw | min |
+| `0x00FF01` | Remaining Time | raw | minutes |
 | `0x00FF01` | Battery pack SOC | raw × 0.0025 | % |
+| `0x00FF01` | LowLevel Alarm | `0` = no, `1` = YES | |
+| `0x00FF01` | CriticalLow Alarm | `0` = no, `1` = YES | |
+| `0x00FF01` | Reserved Alarm 3-8 | `0` = no, `1` = YES | |
 
 ## Troubleshooting
 
 - If the app reports that the DLL cannot be loaded, confirm `ECanVci.dll` is in the same directory as `j1939_bms_monitor.py` or the packaged executable.
 - If the DLL loads but the device will not open, confirm the GCAN driver is installed and the adapter is visible to Windows.
-- If no frames update, confirm the bus speed, CAN wiring, termination, and that the BMS is transmitting `0x00FF00` and `0x00FF01`.
+- If no frames update, confirm the bus is running at 500 kbps, check CAN wiring and termination, and confirm that the BMS is transmitting `0x00FF00` and `0x00FF01`.
 - If Python reports an architecture error while loading the DLL, use a DLL build that matches your Python architecture.
