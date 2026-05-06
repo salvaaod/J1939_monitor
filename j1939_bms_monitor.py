@@ -39,7 +39,7 @@ DEFAULT_DEVICE_TYPE = USBCAN_II
 DEFAULT_DEVICE_INDEX = 0
 DEFAULT_CAN_INDEX = 0
 DEFAULT_DLL_NAME = "ECanVci.dll"
-DEFAULT_WINDOW_GEOMETRY = "773x604"
+DEFAULT_WINDOW_GEOMETRY = "480x570+99+79"
 SETTINGS_REGISTRY_PATH = r"Software\J1939BmsMonitor"
 SETTINGS_REGISTRY_VALUE = "Settings"
 SETTINGS_FILE_NAME = ".j1939_bms_monitor_settings.json"
@@ -181,17 +181,17 @@ SIGNALS: tuple[SignalDefinition, ...] = (
 
 
 DEFAULT_PGN_COLUMN_WIDTHS: dict[str, int] = {
-    "pgn": 137,
-    "can_id": 132,
-    "payload": 184,
-    "age": 172,
+    "pgn": 83,
+    "can_id": 102,
+    "payload": 162,
+    "age": 91,
 }
 DEFAULT_SIGNAL_COLUMN_WIDTHS: dict[str, int] = {
-    "pgn": 99,
-    "signal": 151,
-    "raw": 301,
-    "value": 139,
-    "unit": 46,
+    "pgn": 76,
+    "signal": 174,
+    "raw": 68,
+    "value": 66,
+    "unit": 54,
 }
 
 
