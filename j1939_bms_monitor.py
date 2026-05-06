@@ -4,7 +4,8 @@ The app monitors the two proprietary MASTERvOLT J1939 BMS PGNs shown in the
 provided CAN matrix and participates in the core J1939 network-management
 protocols needed for address claiming and product identification.
 
-Run on Windows with the GCAN driver and ECanVci.dll available::
+Run on Windows with the GCAN driver installed and ECanVci.dll placed in the
+same directory as this script or bundled executable::
 
     python j1939_bms_monitor.py
 """
@@ -18,7 +19,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any, Iterable
@@ -46,6 +47,26 @@ TIMING0_250K = 0x01
 TIMING1_250K = 0x1C
 TIMING0_500K = 0x00
 TIMING1_500K = 0x1C
+
+
+def app_directory() -> Path:
+    """Return the directory that contains the running script or executable."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def default_dll_path() -> str:
+    """Default to the GCAN DLL shipped beside the running application."""
+    return str(app_directory() / DEFAULT_DLL_NAME)
+
+
+def resolve_dll_path(dll_path: str) -> str:
+    """Resolve relative GCAN DLL paths against the running application folder."""
+    path = Path(dll_path.strip() or DEFAULT_DLL_NAME)
+    if path.is_absolute():
+        return str(path)
+    return str(app_directory() / path)
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +125,7 @@ class INIT_CONFIG(ctypes.Structure):
 
 @dataclass(frozen=True)
 class DeviceConfig:
-    dll_path: str = DEFAULT_DLL_NAME
+    dll_path: str = field(default_factory=default_dll_path)
     device_type: int = DEFAULT_DEVICE_TYPE
     device_index: int = DEFAULT_DEVICE_INDEX
     can_index: int = DEFAULT_CAN_INDEX
@@ -261,6 +282,13 @@ def setting_as_str(settings: dict[str, Any], key: str, default: str) -> str:
         return value
     return default
 
+
+def setting_as_dll_path(settings: dict[str, Any]) -> str:
+    value = settings.get("dll_path", default_dll_path())
+    if isinstance(value, str) and value.strip():
+        return resolve_dll_path(value)
+    return default_dll_path()
+
 # ---------------------------------------------------------------------------
 # J1939 helpers
 # ---------------------------------------------------------------------------
@@ -355,7 +383,7 @@ def format_signal_value(definition: SignalDefinition, data: bytes) -> tuple[str,
 class GCANDevice:
     def __init__(self, config: DeviceConfig):
         self.config = config
-        self.dll = ctypes.WinDLL(config.dll_path)
+        self.dll = ctypes.WinDLL(resolve_dll_path(config.dll_path))
         self._bind_functions()
 
     def _bind_functions(self) -> None:
@@ -581,7 +609,7 @@ class BmsMonitorApp(tk.Tk):
         connection = ttk.LabelFrame(self, text="GCAN / USBCAN connection")
         connection.pack(fill="x", padx=10, pady=8)
 
-        self.dll_var = tk.StringVar(value=setting_as_str(self.settings, "dll_path", DEFAULT_DLL_NAME))
+        self.dll_var = tk.StringVar(value=setting_as_dll_path(self.settings))
         self.device_type_var = tk.StringVar(value=setting_as_entry_value(self.settings, "device_type", DEFAULT_DEVICE_TYPE))
         self.device_index_var = tk.StringVar(value=setting_as_entry_value(self.settings, "device_index", DEFAULT_DEVICE_INDEX))
         self.can_index_var = tk.StringVar(value=setting_as_entry_value(self.settings, "can_index", DEFAULT_CAN_INDEX))
@@ -660,7 +688,7 @@ class BmsMonitorApp(tk.Tk):
             if not 0 <= source_address <= 253:
                 raise ValueError("Monitor SA must be between 0x00 and 0xFD")
             config = DeviceConfig(
-                dll_path=self.dll_var.get().strip() or DEFAULT_DLL_NAME,
+                dll_path=resolve_dll_path(self.dll_var.get()),
                 device_type=int(self.device_type_var.get()),
                 device_index=int(self.device_index_var.get()),
                 can_index=int(self.can_index_var.get()),
@@ -730,7 +758,7 @@ class BmsMonitorApp(tk.Tk):
     def _collect_settings(self) -> dict[str, Any]:
         self.update_idletasks()
         return {
-            "dll_path": self.dll_var.get().strip() or DEFAULT_DLL_NAME,
+            "dll_path": resolve_dll_path(self.dll_var.get()),
             "device_type": self.device_type_var.get().strip() or str(DEFAULT_DEVICE_TYPE),
             "device_index": self.device_index_var.get().strip() or str(DEFAULT_DEVICE_INDEX),
             "can_index": self.can_index_var.get().strip() or str(DEFAULT_CAN_INDEX),
