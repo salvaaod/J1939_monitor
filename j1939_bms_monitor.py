@@ -38,7 +38,7 @@ DEFAULT_DEVICE_TYPE = USBCAN_II
 DEFAULT_DEVICE_INDEX = 0
 DEFAULT_CAN_INDEX = 0
 DEFAULT_DLL_NAME = "ECanVci.dll"
-DEFAULT_WINDOW_GEOMETRY = "1180x720"
+DEFAULT_WINDOW_GEOMETRY = "773x604"
 SETTINGS_REGISTRY_PATH = r"Software\J1939BmsMonitor"
 SETTINGS_REGISTRY_VALUE = "Settings"
 SETTINGS_FILE_NAME = ".j1939_bms_monitor_settings.json"
@@ -157,14 +157,14 @@ SIGNALS: tuple[SignalDefinition, ...] = (
     SignalDefinition(PGN_PROP_00, "Battery pack temperature", 4, 0, 8, 1.0, -40.0, "deg C", 0xFF),
     SignalDefinition(PGN_PROP_01, "LowLevel Alarm", 0, 0, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Low Level alarm"}),
     SignalDefinition(PGN_PROP_01, "CriticalLow Alarm", 0, 1, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Critical Level alarm"}),
+    SignalDefinition(PGN_PROP_01, "Remaining Time", 1, 0, 16, 1.0, 0.0, "min", 0xFFFF),
+    SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF),
     SignalDefinition(PGN_PROP_01, "Reserved Alarm 3", 0, 2, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
     SignalDefinition(PGN_PROP_01, "Reserved Alarm 4", 0, 3, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
     SignalDefinition(PGN_PROP_01, "Reserved Alarm 5", 0, 4, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
     SignalDefinition(PGN_PROP_01, "Reserved Alarm 6", 0, 5, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
     SignalDefinition(PGN_PROP_01, "Reserved Alarm 7", 0, 6, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
     SignalDefinition(PGN_PROP_01, "Reserved Alarm 8", 0, 7, 1, 1.0, 0.0, "", 0x0, {0: "No Alarm", 1: "Alarm"}),
-    SignalDefinition(PGN_PROP_01, "Remaining Time", 1, 0, 16, 1.0, 0.0, "min", 0xFFFF),
-    SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF),
 )
 
 
@@ -175,18 +175,18 @@ SIGNALS: tuple[SignalDefinition, ...] = (
 
 
 DEFAULT_PGN_COLUMN_WIDTHS: dict[str, int] = {
-    "pgn": 110,
-    "can_id": 120,
-    "source": 80,
-    "payload": 360,
-    "age": 160,
+    "pgn": 137,
+    "can_id": 132,
+    "source": 111,
+    "payload": 184,
+    "age": 172,
 }
 DEFAULT_SIGNAL_COLUMN_WIDTHS: dict[str, int] = {
-    "pgn": 110,
-    "signal": 280,
-    "raw": 100,
-    "value": 200,
-    "unit": 80,
+    "pgn": 99,
+    "signal": 151,
+    "raw": 301,
+    "value": 139,
+    "unit": 46,
 }
 
 
