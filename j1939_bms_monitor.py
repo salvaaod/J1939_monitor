@@ -26,7 +26,16 @@ from tkinter import messagebox, ttk
 from typing import Any, Iterable
 
 if sys.platform == "win32":
+    import ctypes.wintypes
     import winreg
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.wintypes.DWORD),
+            ("rcMonitor", ctypes.wintypes.RECT),
+            ("rcWork", ctypes.wintypes.RECT),
+            ("dwFlags", ctypes.wintypes.DWORD),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +48,7 @@ DEFAULT_DEVICE_TYPE = USBCAN_II
 DEFAULT_DEVICE_INDEX = 0
 DEFAULT_CAN_INDEX = 0
 DEFAULT_DLL_NAME = "ECanVci.dll"
-DEFAULT_WINDOW_GEOMETRY = "480x570+99+79"
+DEFAULT_WINDOW_SIZE = "480x570"
 DEFAULT_DISCOVERY_WINDOW_GEOMETRY = "760x300+120+120"
 SETTINGS_REGISTRY_PATH = r"Software\J1939BmsMonitor"
 SETTINGS_REGISTRY_VALUE = "Settings"
@@ -246,6 +255,13 @@ class SettingsStore:
         else:
             self._save_to_file(settings)
 
+    def delete(self) -> None:
+        """Remove all persisted settings owned by this application."""
+        if sys.platform == "win32":
+            self._delete_registry_key()
+        else:
+            self._delete_settings_file()
+
     def _load_from_registry(self) -> dict[str, Any]:
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH) as key:
@@ -258,6 +274,22 @@ class SettingsStore:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH) as key:
             winreg.SetValueEx(key, SETTINGS_REGISTRY_VALUE, 0, winreg.REG_SZ, json.dumps(settings, sort_keys=True))
 
+    def _delete_registry_key(self) -> None:
+        self._delete_registry_tree(winreg.HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH)
+
+    def _delete_registry_tree(self, root: int, path: str) -> None:
+        try:
+            with winreg.OpenKey(root, path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+                while True:
+                    try:
+                        child = winreg.EnumKey(key, 0)
+                    except OSError:
+                        break
+                    self._delete_registry_tree(root, f"{path}\\{child}")
+        except FileNotFoundError:
+            return
+        winreg.DeleteKey(root, path)
+
     def _load_from_file(self) -> dict[str, Any]:
         settings_path = Path.home() / SETTINGS_FILE_NAME
         try:
@@ -269,6 +301,12 @@ class SettingsStore:
     def _save_to_file(self, settings: dict[str, Any]) -> None:
         settings_path = Path.home() / SETTINGS_FILE_NAME
         settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _delete_settings_file(self) -> None:
+        try:
+            (Path.home() / SETTINGS_FILE_NAME).unlink()
+        except FileNotFoundError:
+            pass
 
     @staticmethod
     def _parse_payload(payload: object) -> dict[str, Any]:
@@ -302,6 +340,46 @@ def setting_as_str(settings: dict[str, Any], key: str, default: str) -> str:
     if isinstance(value, str) and value:
         return value
     return default
+
+
+def geometry_size(geometry: str) -> str:
+    """Return the WIDTHxHEIGHT portion of a Tk geometry string."""
+    return geometry.split("+", 1)[0].split("-", 1)[0]
+
+
+def visible_screen_bounds(window: tk.Misc) -> tuple[int, int, int, int]:
+    """Return the usable screen bounds for centering a startup window."""
+    if sys.platform == "win32":
+        point = ctypes.wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
+        monitor = ctypes.windll.user32.MonitorFromPoint(point, 2)
+        monitor_info = MONITORINFO()
+        monitor_info.cbSize = ctypes.sizeof(monitor_info)
+        if ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(monitor_info)):
+            work_area = monitor_info.rcWork
+            return (
+                int(work_area.left),
+                int(work_area.top),
+                int(work_area.right - work_area.left),
+                int(work_area.bottom - work_area.top),
+            )
+    return (
+        int(window.winfo_vrootx()),
+        int(window.winfo_vrooty()),
+        int(window.winfo_vrootwidth()),
+        int(window.winfo_vrootheight()),
+    )
+
+
+def center_window(window: tk.Misc, size: str) -> None:
+    """Center a Tk window in the visible screen area."""
+    width_text, height_text = geometry_size(size).split("x", 1)
+    width = int(width_text)
+    height = int(height_text)
+    screen_x, screen_y, screen_width, screen_height = visible_screen_bounds(window)
+    x = screen_x + max(0, (screen_width - width) // 2)
+    y = screen_y + max(0, (screen_height - height) // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
 
 # ---------------------------------------------------------------------------
 # J1939 helpers
@@ -830,7 +908,11 @@ class BmsMonitorApp(tk.Tk):
         self.settings_store = SettingsStore()
         self.settings = self.settings_store.load()
         self.title("J1939 MASTERVOLT BMS Monitor")
-        self.geometry(setting_as_str(self.settings, "window_geometry", DEFAULT_WINDOW_GEOMETRY))
+        saved_window_geometry = self.settings.get("window_geometry")
+        if isinstance(saved_window_geometry, str) and saved_window_geometry:
+            self.geometry(saved_window_geometry)
+        else:
+            self.geometry(DEFAULT_WINDOW_SIZE)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.command_queue: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -845,7 +927,10 @@ class BmsMonitorApp(tk.Tk):
         self.device_rows: dict[int, str] = {}
         self.devices: dict[int, ClaimedDevice] = {}
         self.device_window: DeviceDiscoveryWindow | None = None
+        self._skip_settings_save = False
         self._build_ui()
+        if not (isinstance(saved_window_geometry, str) and saved_window_geometry):
+            center_window(self, DEFAULT_WINDOW_SIZE)
         if export_layout:
             self._print_layout_export()
         self.after(100, self._poll_worker)
@@ -859,6 +944,10 @@ class BmsMonitorApp(tk.Tk):
             command=self.request_selected_device_info,
         )
         menu_bar.add_cascade(label="Bus", menu=bus_menu)
+
+        settings_menu = tk.Menu(menu_bar, tearoff=False)
+        settings_menu.add_command(label="Restore defaults", command=self.restore_defaults)
+        menu_bar.add_cascade(label="Settings", menu=settings_menu)
         self.config(menu=menu_bar)
 
     def _build_ui(self) -> None:
@@ -987,6 +1076,34 @@ class BmsMonitorApp(tk.Tk):
     def stop_monitoring(self) -> None:
         self.stop_event.set()
         self.status_var.set("Stopping...")
+
+    def restore_defaults(self) -> None:
+        if not messagebox.askyesno(
+            "Restore defaults",
+            "Delete all saved settings for this application and restore the default layout?",
+            parent=self,
+        ):
+            return
+        try:
+            self.settings_store.delete()
+        except OSError as exc:
+            messagebox.showerror("Restore defaults", f"Could not delete saved settings: {exc}", parent=self)
+            return
+        self._skip_settings_save = True
+        self.settings = {}
+        self.source_address_var.set(f"0x{PREFERRED_SOURCE_ADDRESS:02X}")
+        center_window(self, DEFAULT_WINDOW_SIZE)
+        self._apply_tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS)
+        self._apply_tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS)
+        if self.device_window is not None and self.device_window.winfo_exists():
+            self.device_window.geometry(DEFAULT_DISCOVERY_WINDOW_GEOMETRY)
+            self._apply_tree_column_widths(self.device_window.device_tree, DEFAULT_DEVICE_COLUMN_WIDTHS)
+        self.status_var.set("Saved settings deleted; defaults restored")
+        messagebox.showinfo(
+            "Restore defaults",
+            "Saved settings for this application were deleted. Defaults are active for this session.",
+            parent=self,
+        )
 
     def _poll_worker(self) -> None:
         while True:
@@ -1129,6 +1246,10 @@ class BmsMonitorApp(tk.Tk):
     def _tree_column_widths(self, tree: ttk.Treeview, columns: Iterable[str]) -> dict[str, int]:
         return {column: int(tree.column(column, "width")) for column in columns}
 
+    def _apply_tree_column_widths(self, tree: ttk.Treeview, widths: dict[str, int]) -> None:
+        for column, width in widths.items():
+            tree.column(column, width=width)
+
     def _device_column_widths(self) -> dict[str, int]:
         if self.device_window is not None and self.device_window.winfo_exists():
             return self.device_window.column_widths()
@@ -1151,6 +1272,8 @@ class BmsMonitorApp(tk.Tk):
         }
 
     def _save_settings(self) -> None:
+        if self._skip_settings_save:
+            return
         try:
             self.settings_store.save(self._collect_settings())
         except OSError:
