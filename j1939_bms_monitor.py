@@ -246,6 +246,13 @@ class SettingsStore:
         else:
             self._save_to_file(settings)
 
+    def delete(self) -> None:
+        """Remove all persisted settings owned by this application."""
+        if sys.platform == "win32":
+            self._delete_registry_key()
+        else:
+            self._delete_settings_file()
+
     def _load_from_registry(self) -> dict[str, Any]:
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH) as key:
@@ -258,6 +265,22 @@ class SettingsStore:
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH) as key:
             winreg.SetValueEx(key, SETTINGS_REGISTRY_VALUE, 0, winreg.REG_SZ, json.dumps(settings, sort_keys=True))
 
+    def _delete_registry_key(self) -> None:
+        self._delete_registry_tree(winreg.HKEY_CURRENT_USER, SETTINGS_REGISTRY_PATH)
+
+    def _delete_registry_tree(self, root: int, path: str) -> None:
+        try:
+            with winreg.OpenKey(root, path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+                while True:
+                    try:
+                        child = winreg.EnumKey(key, 0)
+                    except OSError:
+                        break
+                    self._delete_registry_tree(root, f"{path}\\{child}")
+        except FileNotFoundError:
+            return
+        winreg.DeleteKey(root, path)
+
     def _load_from_file(self) -> dict[str, Any]:
         settings_path = Path.home() / SETTINGS_FILE_NAME
         try:
@@ -269,6 +292,12 @@ class SettingsStore:
     def _save_to_file(self, settings: dict[str, Any]) -> None:
         settings_path = Path.home() / SETTINGS_FILE_NAME
         settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _delete_settings_file(self) -> None:
+        try:
+            (Path.home() / SETTINGS_FILE_NAME).unlink()
+        except FileNotFoundError:
+            pass
 
     @staticmethod
     def _parse_payload(payload: object) -> dict[str, Any]:
@@ -845,6 +874,7 @@ class BmsMonitorApp(tk.Tk):
         self.device_rows: dict[int, str] = {}
         self.devices: dict[int, ClaimedDevice] = {}
         self.device_window: DeviceDiscoveryWindow | None = None
+        self._skip_settings_save = False
         self._build_ui()
         if export_layout:
             self._print_layout_export()
@@ -859,6 +889,10 @@ class BmsMonitorApp(tk.Tk):
             command=self.request_selected_device_info,
         )
         menu_bar.add_cascade(label="Bus", menu=bus_menu)
+
+        settings_menu = tk.Menu(menu_bar, tearoff=False)
+        settings_menu.add_command(label="Restore defaults", command=self.restore_defaults)
+        menu_bar.add_cascade(label="Settings", menu=settings_menu)
         self.config(menu=menu_bar)
 
     def _build_ui(self) -> None:
@@ -987,6 +1021,34 @@ class BmsMonitorApp(tk.Tk):
     def stop_monitoring(self) -> None:
         self.stop_event.set()
         self.status_var.set("Stopping...")
+
+    def restore_defaults(self) -> None:
+        if not messagebox.askyesno(
+            "Restore defaults",
+            "Delete all saved settings for this application and restore the default layout?",
+            parent=self,
+        ):
+            return
+        try:
+            self.settings_store.delete()
+        except OSError as exc:
+            messagebox.showerror("Restore defaults", f"Could not delete saved settings: {exc}", parent=self)
+            return
+        self._skip_settings_save = True
+        self.settings = {}
+        self.source_address_var.set(f"0x{PREFERRED_SOURCE_ADDRESS:02X}")
+        self.geometry(DEFAULT_WINDOW_GEOMETRY)
+        self._apply_tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS)
+        self._apply_tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS)
+        if self.device_window is not None and self.device_window.winfo_exists():
+            self.device_window.geometry(DEFAULT_DISCOVERY_WINDOW_GEOMETRY)
+            self._apply_tree_column_widths(self.device_window.device_tree, DEFAULT_DEVICE_COLUMN_WIDTHS)
+        self.status_var.set("Saved settings deleted; defaults restored")
+        messagebox.showinfo(
+            "Restore defaults",
+            "Saved settings for this application were deleted. Defaults are active for this session.",
+            parent=self,
+        )
 
     def _poll_worker(self) -> None:
         while True:
@@ -1129,6 +1191,10 @@ class BmsMonitorApp(tk.Tk):
     def _tree_column_widths(self, tree: ttk.Treeview, columns: Iterable[str]) -> dict[str, int]:
         return {column: int(tree.column(column, "width")) for column in columns}
 
+    def _apply_tree_column_widths(self, tree: ttk.Treeview, widths: dict[str, int]) -> None:
+        for column, width in widths.items():
+            tree.column(column, width=width)
+
     def _device_column_widths(self) -> dict[str, int]:
         if self.device_window is not None and self.device_window.winfo_exists():
             return self.device_window.column_widths()
@@ -1151,6 +1217,8 @@ class BmsMonitorApp(tk.Tk):
         }
 
     def _save_settings(self) -> None:
+        if self._skip_settings_save:
+            return
         try:
             self.settings_store.save(self._collect_settings())
         except OSError:
