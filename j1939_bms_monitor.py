@@ -50,7 +50,9 @@ DEFAULT_CAN_INDEX = 0
 DEFAULT_DLL_NAME = "ECanVci.dll"
 DEFAULT_WINDOW_SIZE = "480x570"
 DEFAULT_DISCOVERY_WINDOW_GEOMETRY = "760x300+120+120"
-DEFAULT_BIG_SCREEN_GEOMETRY = "760x520+160+160"
+DEFAULT_BIG_SCREEN_GEOMETRY = "760x640+160+160"
+MIN_BIG_SCREEN_WIDTH = 760
+MIN_BIG_SCREEN_HEIGHT = 640
 SETTINGS_REGISTRY_PATH = r"Software\J1939BmsMonitor"
 SETTINGS_REGISTRY_VALUE = "Settings"
 SETTINGS_FILE_NAME = ".j1939_bms_monitor_settings.json"
@@ -346,6 +348,18 @@ def setting_as_str(settings: dict[str, Any], key: str, default: str) -> str:
 def geometry_size(geometry: str) -> str:
     """Return the WIDTHxHEIGHT portion of a Tk geometry string."""
     return geometry.split("+", 1)[0].split("-", 1)[0]
+
+
+def geometry_with_minimum_size(geometry: str, min_width: int, min_height: int) -> str:
+    """Return geometry with at least the requested size, preserving position."""
+    size = geometry_size(geometry)
+    try:
+        width_text, height_text = size.split("x", 1)
+        width = max(int(width_text), min_width)
+        height = max(int(height_text), min_height)
+    except ValueError:
+        return f"{min_width}x{min_height}"
+    return geometry.replace(size, f"{width}x{height}", 1)
 
 
 def visible_screen_bounds(window: tk.Misc) -> tuple[int, int, int, int]:
@@ -930,7 +944,14 @@ class BigScreenWindow(tk.Toplevel):
         super().__init__(app)
         self.app = app
         self.title("BMS Big Screen")
-        self.geometry(setting_as_str(app.settings, "big_screen_geometry", DEFAULT_BIG_SCREEN_GEOMETRY))
+        self.geometry(
+            geometry_with_minimum_size(
+                setting_as_str(app.settings, "big_screen_geometry", DEFAULT_BIG_SCREEN_GEOMETRY),
+                MIN_BIG_SCREEN_WIDTH,
+                MIN_BIG_SCREEN_HEIGHT,
+            )
+        )
+        self.minsize(MIN_BIG_SCREEN_WIDTH, MIN_BIG_SCREEN_HEIGHT)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.value_vars: dict[str, tk.StringVar] = {}
 
