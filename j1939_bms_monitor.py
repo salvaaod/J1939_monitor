@@ -50,6 +50,9 @@ DEFAULT_CAN_INDEX = 0
 DEFAULT_DLL_NAME = "ECanVci.dll"
 DEFAULT_WINDOW_SIZE = "480x570"
 DEFAULT_DISCOVERY_WINDOW_GEOMETRY = "760x300+120+120"
+DEFAULT_BIG_SCREEN_GEOMETRY = "760x640+160+160"
+MIN_BIG_SCREEN_WIDTH = 760
+MIN_BIG_SCREEN_HEIGHT = 640
 SETTINGS_REGISTRY_PATH = r"Software\J1939BmsMonitor"
 SETTINGS_REGISTRY_VALUE = "Settings"
 SETTINGS_FILE_NAME = ".j1939_bms_monitor_settings.json"
@@ -194,8 +197,8 @@ SIGNALS: tuple[SignalDefinition, ...] = (
     SignalDefinition(PGN_PROP_00, "Battery pack voltage", 0, 0, 16, 0.05, 0.0, "V", 0xFFFF),
     SignalDefinition(PGN_PROP_00, "Battery pack net current", 2, 0, 16, 0.05, -1000.0, "A", 0xFFFF),
     SignalDefinition(PGN_PROP_00, "Battery pack temperature", 4, 0, 8, 1.0, -40.0, "deg C", 0xFF),
-    SignalDefinition(PGN_PROP_01, "Remaining Time", 1, 0, 16, 1.0, 0.0, "minutes", 0xFFFF),
-    SignalDefinition(PGN_PROP_01, "Battery pack SOC", 3, 0, 16, 0.0025, 0.0, "%", 0xFFFF, decimal_places=1),
+    SignalDefinition(PGN_PROP_01, "Remaining Time", 2, 0, 16, 1.0, 0.0, "", None),
+    SignalDefinition(PGN_PROP_01, "Battery pack SOC", 4, 0, 16, 0.0025, 0.0, "%", 0xFFFF, decimal_places=1),
     SignalDefinition(PGN_PROP_01, "LowLevel Alarm", 0, 0, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
     SignalDefinition(PGN_PROP_01, "CriticalLow Alarm", 0, 1, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
     SignalDefinition(PGN_PROP_01, "Reserved Alarm 3", 0, 2, 1, 1.0, 0.0, "", None, ALARM_VALUE_MAP),
@@ -347,6 +350,18 @@ def geometry_size(geometry: str) -> str:
     return geometry.split("+", 1)[0].split("-", 1)[0]
 
 
+def geometry_with_minimum_size(geometry: str, min_width: int, min_height: int) -> str:
+    """Return geometry with at least the requested size, preserving position."""
+    size = geometry_size(geometry)
+    try:
+        width_text, height_text = size.split("x", 1)
+        width = max(int(width_text), min_width)
+        height = max(int(height_text), min_height)
+    except ValueError:
+        return f"{min_width}x{min_height}"
+    return geometry.replace(size, f"{width}x{height}", 1)
+
+
 def visible_screen_bounds(window: tk.Misc) -> tuple[int, int, int, int]:
     """Return the usable screen bounds for centering a startup window."""
     if sys.platform == "win32":
@@ -470,9 +485,19 @@ def format_scaled_value(value: float, definition: SignalDefinition) -> str:
     return f"{sign}{text}"
 
 
+def format_remaining_time(raw_minutes: int) -> str:
+    """Format a remaining-time signal as hh:mm or --:-- when unavailable."""
+    if raw_minutes > 0xFFF0:
+        return "--:--"
+    hours, minutes = divmod(raw_minutes, 60)
+    return f"{hours:02d}:{minutes:02d}"
+
+
 def format_signal_value(definition: SignalDefinition, data: bytes) -> tuple[str, str]:
     raw = extract_little_endian(data, definition.start_bit_index, definition.bit_length)
     raw_text = format_raw_value(raw, definition.bit_length)
+    if definition.label == "Remaining Time":
+        return format_remaining_time(raw), raw_text
     if definition.na_value is not None and raw == definition.na_value:
         return "N/A", raw_text
     if definition.value_map:
@@ -902,6 +927,60 @@ class DeviceDiscoveryWindow(tk.Toplevel):
         self.destroy()
 
 
+class BigScreenWindow(tk.Toplevel):
+    """Large, glanceable dashboard for the key BMS values."""
+
+    FIELD_DEFINITIONS = (
+        ("Voltage", "Battery pack voltage"),
+        ("Current", "Battery pack net current"),
+        ("Amps", "Battery pack net current"),
+        ("SOC", "Battery pack SOC"),
+        ("Time Rem", "Remaining Time"),
+        ("Low. Alarm", "LowLevel Alarm"),
+        ("Crit. Alarm", "CriticalLow Alarm"),
+    )
+
+    def __init__(self, app: BmsMonitorApp):
+        super().__init__(app)
+        self.app = app
+        self.title("BMS Big Screen")
+        self.geometry(
+            geometry_with_minimum_size(
+                setting_as_str(app.settings, "big_screen_geometry", DEFAULT_BIG_SCREEN_GEOMETRY),
+                MIN_BIG_SCREEN_WIDTH,
+                MIN_BIG_SCREEN_HEIGHT,
+            )
+        )
+        self.minsize(MIN_BIG_SCREEN_WIDTH, MIN_BIG_SCREEN_HEIGHT)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.value_vars: dict[str, tk.StringVar] = {}
+
+        content = ttk.Frame(self, padding=24)
+        content.pack(fill="both", expand=True)
+        content.columnconfigure(0, weight=0)
+        content.columnconfigure(1, weight=1)
+
+        label_font = ("Arial", 30, "bold")
+        value_font = ("Arial", 36, "bold")
+        for row, (display_label, signal_label) in enumerate(self.FIELD_DEFINITIONS):
+            ttk.Label(content, text=f"{display_label}:", font=label_font).grid(
+                row=row, column=0, sticky="e", padx=(0, 24), pady=8
+            )
+            value_var = tk.StringVar(value=app.big_screen_value(signal_label))
+            ttk.Label(content, textvariable=value_var, font=value_font).grid(
+                row=row, column=1, sticky="w", pady=8
+            )
+            self.value_vars[display_label] = value_var
+
+    def refresh_values(self) -> None:
+        for display_label, signal_label in self.FIELD_DEFINITIONS:
+            self.value_vars[display_label].set(self.app.big_screen_value(signal_label))
+
+    def _close(self) -> None:
+        self.app.big_screen_window = None
+        self.destroy()
+
+
 class BmsMonitorApp(tk.Tk):
     def __init__(self, export_layout: bool = False):
         super().__init__()
@@ -920,6 +999,7 @@ class BmsMonitorApp(tk.Tk):
         self.worker: MonitorWorker | None = None
         self.signal_rows: dict[str, str] = {}
         self.signal_update_times: dict[str, float] = {}
+        self.signal_values: dict[str, tuple[str, str]] = {}
         self.timed_out_signals: set[str] = set()
         self.pgn_rows: dict[int, str] = {}
         self.pgn_update_times: dict[int, float] = {}
@@ -927,6 +1007,7 @@ class BmsMonitorApp(tk.Tk):
         self.device_rows: dict[int, str] = {}
         self.devices: dict[int, ClaimedDevice] = {}
         self.device_window: DeviceDiscoveryWindow | None = None
+        self.big_screen_window: BigScreenWindow | None = None
         self._skip_settings_save = False
         self._build_ui()
         if not (isinstance(saved_window_geometry, str) and saved_window_geometry):
@@ -944,6 +1025,10 @@ class BmsMonitorApp(tk.Tk):
             command=self.request_selected_device_info,
         )
         menu_bar.add_cascade(label="Bus", menu=bus_menu)
+
+        view_menu = tk.Menu(menu_bar, tearoff=False)
+        view_menu.add_command(label="Big screen", command=self.show_big_screen)
+        menu_bar.add_cascade(label="View", menu=view_menu)
 
         settings_menu = tk.Menu(menu_bar, tearoff=False)
         settings_menu.add_command(label="Restore defaults", command=self.restore_defaults)
@@ -1008,6 +1093,27 @@ class BmsMonitorApp(tk.Tk):
                 values=(f"0x{definition.pgn:05X}", definition.label, "-", NO_FRAME_TEXT, definition.unit),
             )
             self.signal_rows[key] = item
+
+    def show_big_screen(self) -> BigScreenWindow:
+        if self.big_screen_window is None or not self.big_screen_window.winfo_exists():
+            self.big_screen_window = BigScreenWindow(self)
+        else:
+            self.big_screen_window.deiconify()
+            self.big_screen_window.lift()
+            self.big_screen_window.focus_set()
+        self.big_screen_window.refresh_values()
+        return self.big_screen_window
+
+    def big_screen_value(self, signal_label: str) -> str:
+        value_and_unit = self.signal_values.get(signal_label)
+        if value_and_unit is None:
+            return "--"
+        value, unit = value_and_unit
+        return f"{value} {unit}".rstrip()
+
+    def _refresh_big_screen(self) -> None:
+        if self.big_screen_window is not None and self.big_screen_window.winfo_exists():
+            self.big_screen_window.refresh_values()
 
     def show_device_window(self) -> DeviceDiscoveryWindow:
         if self.device_window is None or not self.device_window.winfo_exists():
@@ -1098,6 +1204,8 @@ class BmsMonitorApp(tk.Tk):
         if self.device_window is not None and self.device_window.winfo_exists():
             self.device_window.geometry(DEFAULT_DISCOVERY_WINDOW_GEOMETRY)
             self._apply_tree_column_widths(self.device_window.device_tree, DEFAULT_DEVICE_COLUMN_WIDTHS)
+        if self.big_screen_window is not None and self.big_screen_window.winfo_exists():
+            self.big_screen_window.geometry(DEFAULT_BIG_SCREEN_GEOMETRY)
         self.status_var.set("Saved settings deleted; defaults restored")
         messagebox.showinfo(
             "Restore defaults",
@@ -1167,6 +1275,7 @@ class BmsMonitorApp(tk.Tk):
 
     def _reset_signal_rows(self) -> None:
         self.signal_update_times.clear()
+        self.signal_values.clear()
         self.timed_out_signals.clear()
         for definition in SIGNALS:
             key = self._signal_key(definition)
@@ -1176,6 +1285,7 @@ class BmsMonitorApp(tk.Tk):
                     row,
                     values=(f"0x{definition.pgn:05X}", definition.label, "-", NO_FRAME_TEXT, definition.unit),
                 )
+        self._refresh_big_screen()
 
     def _expire_stale_pgns(self) -> None:
         now = time.monotonic()
@@ -1202,7 +1312,9 @@ class BmsMonitorApp(tk.Tk):
                 row,
                 values=(f"0x{definition.pgn:05X}", definition.label, "-", TIMEOUT_TEXT, definition.unit),
             )
+            self.signal_values[definition.label] = (TIMEOUT_TEXT, definition.unit)
             self.timed_out_signals.add(key)
+        self._refresh_big_screen()
 
     def _update_frame(self, can_id: int, data: bytes, parsed: ParsedId) -> None:
         item = self.pgn_rows.get(parsed.pgn)
@@ -1222,8 +1334,10 @@ class BmsMonitorApp(tk.Tk):
             key = self._signal_key(definition)
             row = self.signal_rows[key]
             self.signal_tree.item(row, values=(f"0x{definition.pgn:05X}", definition.label, raw, value, definition.unit))
+            self.signal_values[definition.label] = (value, definition.unit)
             self.signal_update_times[key] = updated_at
             self.timed_out_signals.discard(key)
+        self._refresh_big_screen()
 
     @staticmethod
     def _signal_key(definition: SignalDefinition) -> str:
@@ -1235,6 +1349,7 @@ class BmsMonitorApp(tk.Tk):
             "window_geometry": self.geometry(),
             "window_size": {"width": self.winfo_width(), "height": self.winfo_height()},
             "device_window_geometry": self._device_window_geometry(),
+            "big_screen_geometry": self._big_screen_geometry(),
             "device_column_widths": self._device_column_widths(),
             "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
             "signal_column_widths": self._tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS),
@@ -1260,12 +1375,18 @@ class BmsMonitorApp(tk.Tk):
             return self.device_window.geometry()
         return setting_as_str(self.settings, "device_window_geometry", DEFAULT_DISCOVERY_WINDOW_GEOMETRY)
 
+    def _big_screen_geometry(self) -> str:
+        if self.big_screen_window is not None and self.big_screen_window.winfo_exists():
+            return self.big_screen_window.geometry()
+        return setting_as_str(self.settings, "big_screen_geometry", DEFAULT_BIG_SCREEN_GEOMETRY)
+
     def _collect_settings(self) -> dict[str, Any]:
         self.update_idletasks()
         return {
             "source_address": self.source_address_var.get().strip() or f"0x{PREFERRED_SOURCE_ADDRESS:02X}",
             "window_geometry": self.geometry(),
             "device_window_geometry": self._device_window_geometry(),
+            "big_screen_geometry": self._big_screen_geometry(),
             "device_column_widths": self._device_column_widths(),
             "pgn_column_widths": self._tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS),
             "signal_column_widths": self._tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS),
