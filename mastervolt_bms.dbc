@@ -1,0 +1,77 @@
+VERSION "J1939 MASTERVOLT BMS monitor decode matrix"
+
+
+NS_ :
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: Vector__XXX MASTERVOLT_BMS
+
+BO_ 2566848755 BMS_Proprietary_00: 8 MASTERVOLT_BMS
+ SG_ Battery_pack_voltage : 0|16@1+ (0.05,0) [0|3212.7] "V" Vector__XXX
+ SG_ Battery_pack_net_current : 16|16@1+ (0.05,-1000) [-1000|2212.7] "A" Vector__XXX
+ SG_ Battery_pack_temperature : 32|8@1+ (1,-40) [-40|214] "deg C" Vector__XXX
+
+BO_ 2566849011 BMS_Proprietary_01: 8 MASTERVOLT_BMS
+ SG_ LowLevel_Alarm : 0|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ CriticalLow_Alarm : 1|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ Reserved_Alarm_3 : 2|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ Reserved_Alarm_4 : 3|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ Reserved_Alarm_5 : 4|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ Reserved_Alarm_6 : 5|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ Reserved_Alarm_7 : 6|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ Reserved_Alarm_8 : 7|1@1+ (1,0) [0|1] "" Vector__XXX
+ SG_ Remaining_Time : 16|16@1+ (1,0) [0|65535] "min" Vector__XXX
+ SG_ Battery_pack_SOC : 32|16@1+ (0.0025,0) [0|163.8375] "%" Vector__XXX
+
+CM_ "DBC for the proprietary MASTERVOLT J1939 BMS PGNs decoded by j1939_bms_monitor.py. Message IDs use the example transmitting source address 0xF3 (18FF00F3 and 18FF01F3) and the DBC extended-frame flag.";
+CM_ BO_ 2566848755 "J1939 PGN 0x00FF00, example CAN ID 0x18FF00F3.";
+CM_ BO_ 2566849011 "J1939 PGN 0x00FF01, example CAN ID 0x18FF01F3.";
+CM_ SG_ 2566848755 Battery_pack_voltage "Raw value 0xFFFF is not available in the monitor application.";
+CM_ SG_ 2566848755 Battery_pack_net_current "Raw value 0xFFFF is not available in the monitor application.";
+CM_ SG_ 2566848755 Battery_pack_temperature "Raw value 0xFF is not available in the monitor application.";
+CM_ SG_ 2566849011 Battery_pack_SOC "Raw value 0xFFFF is not available in the monitor application.";
+
+BA_DEF_ BO_ "VFrameFormat" ENUM "StandardCAN","ExtendedCAN","reserved","J1939PG";
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 65535;
+BA_DEF_DEF_ "VFrameFormat" "J1939PG";
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+BA_ "VFrameFormat" BO_ 2566848755 3;
+BA_ "VFrameFormat" BO_ 2566849011 3;
+
+VAL_ 2566849011 LowLevel_Alarm 0 "no" 1 "YES";
+VAL_ 2566849011 CriticalLow_Alarm 0 "no" 1 "YES";
+VAL_ 2566849011 Reserved_Alarm_3 0 "no" 1 "YES";
+VAL_ 2566849011 Reserved_Alarm_4 0 "no" 1 "YES";
+VAL_ 2566849011 Reserved_Alarm_5 0 "no" 1 "YES";
+VAL_ 2566849011 Reserved_Alarm_6 0 "no" 1 "YES";
+VAL_ 2566849011 Reserved_Alarm_7 0 "no" 1 "YES";
+VAL_ 2566849011 Reserved_Alarm_8 0 "no" 1 "YES";
