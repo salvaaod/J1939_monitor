@@ -1,0 +1,27 @@
+FormatVersion=5.0 // Do not edit this line!
+Title="J1939 MASTERVOLT BMS monitor decode matrix"
+
+{ENUMS}
+enum AlarmState(0="no", 1="YES")
+
+{RECEIVE}
+[BMS_Proprietary_00]
+ID=18FF00F3h
+DLC=8
+Var=Battery_pack_voltage unsigned 0,16 /f:0.05 /u:V
+Var=Battery_pack_net_current unsigned 16,16 /f:0.05 /o:-1000 /u:A
+Var=Battery_pack_temperature unsigned 32,8 /o:-40 /u:"deg C"
+
+[BMS_Proprietary_01]
+ID=18FF01F3h
+DLC=8
+Var=LowLevel_Alarm bit 0,1 /e:AlarmState
+Var=CriticalLow_Alarm bit 1,1 /e:AlarmState
+Var=Reserved_Alarm_3 bit 2,1 /e:AlarmState
+Var=Reserved_Alarm_4 bit 3,1 /e:AlarmState
+Var=Reserved_Alarm_5 bit 4,1 /e:AlarmState
+Var=Reserved_Alarm_6 bit 5,1 /e:AlarmState
+Var=Reserved_Alarm_7 bit 6,1 /e:AlarmState
+Var=Reserved_Alarm_8 bit 7,1 /e:AlarmState
+Var=Remaining_Time unsigned 16,16 /u:min
+Var=Battery_pack_SOC unsigned 32,16 /f:0.0025 /u:%

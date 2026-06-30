@@ -175,6 +175,16 @@ Transmit and receive paths set and expect 29-bit extended CAN frames, which J193
 | `0x00FF01` | CriticalLow Alarm | `0` = no, `1` = YES | |
 | `0x00FF01` | Reserved Alarm 3-8 | `0` = no, `1` = YES | |
 
+
+## CAN Monitor Decode Files
+
+This repository includes ready-to-load decode databases for third-party CAN monitor software:
+
+- `mastervolt_bms.dbc` for tools that import Vector DBC files.
+- `mastervolt_bms.sym` for tools that import PEAK PCAN symbol files.
+
+Both files describe the same proprietary MASTERvOLT BMS signals decoded by this application for PGNs `0x00FF00` and `0x00FF01`. The database message identifiers use the example source address from the supplied matrix (`0xF3`), so the full extended CAN identifiers are `0x18FF00F3` and `0x18FF01F3`. If your BMS transmits from a different J1939 source address, change the final byte of each message ID in the DBC/SYM file to match that source address.
+
 ## Troubleshooting
 
 - If the app reports that the DLL cannot be loaded, confirm `ECanVci.dll` is in the same directory as `j1939_bms_monitor.py` or the packaged executable.
