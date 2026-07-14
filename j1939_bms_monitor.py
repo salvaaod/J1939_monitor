@@ -521,18 +521,16 @@ def scaled_to_raw(value: float, definition: SignalDefinition) -> int:
     return max(0, min((1 << definition.bit_length) - 1, round((value - definition.offset) / definition.factor)))
 
 
-def simulated_bms_payloads(elapsed_seconds: float) -> dict[int, bytes]:
+def simulated_bms_payloads(elapsed_seconds: float, alarm_states: dict[str, bool] | None = None) -> dict[int, bytes]:
     """Create realistic Mastervolt BMS payloads for GCAN simulation mode."""
     voltage = 26.0 + 6.0 * math.sin(elapsed_seconds / 18.0)
     current = 35.0 * math.sin(elapsed_seconds / 7.0)
     temperature = 24.0 + 6.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 24.0))
     soc = 50.0 + 35.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 60.0))
     remaining_minutes = int(max(0, soc / 100.0 * 12.0 * 60.0))
-    alarm_cycle_seconds = elapsed_seconds % 60.0
-    low_alarm = int(20.0 <= alarm_cycle_seconds < 30.0)
-    critical_alarm = int(45.0 <= alarm_cycle_seconds < 52.0)
-    if critical_alarm:
-        low_alarm = 1
+    alarm_states = alarm_states or {}
+    low_alarm = int(alarm_states.get("LowLevel Alarm", False))
+    critical_alarm = int(alarm_states.get("CriticalLow Alarm", False))
 
     by_label = {definition.label: definition for definition in SIGNALS}
     prop_00 = bytearray(b"\xFF" * 8)
@@ -818,14 +816,17 @@ class MonitorWorker(threading.Thread):
                 command, payload = self.command_queue.get_nowait()
             except queue.Empty:
                 break
-            if command == "query_address_claim":
-                self.transport_sessions.clear()
-                node.send_request(PGN_ADDRESS_CLAIMED, GLOBAL_ADDRESS)
-                self.event_queue.put(("status", f"Address-claim query sent from 0x{node.source_address:02X}"))
-            elif command == "request_component_info":
-                source_address = int(payload)
-                node.send_request(PGN_COMPONENT_IDENTIFICATION, source_address)
-                self.event_queue.put(("status", f"Requested Manufacturer & Device Information from 0x{source_address:02X}"))
+            self._handle_command(node, command, payload)
+
+    def _handle_command(self, node: J1939Node, command: str, payload: object) -> None:
+        if command == "query_address_claim":
+            self.transport_sessions.clear()
+            node.send_request(PGN_ADDRESS_CLAIMED, GLOBAL_ADDRESS)
+            self.event_queue.put(("status", f"Address-claim query sent from 0x{node.source_address:02X}"))
+        elif command == "request_component_info":
+            source_address = int(payload)
+            node.send_request(PGN_COMPONENT_IDENTIFICATION, source_address)
+            self.event_queue.put(("status", f"Requested Manufacturer & Device Information from 0x{source_address:02X}"))
 
     def _handle_bus_discovery_frame(self, parsed: ParsedId, data: bytes) -> None:
         if parsed.pgn == PGN_ADDRESS_CLAIMED and len(data) >= 8 and parsed.source_address != NULL_ADDRESS:
@@ -873,6 +874,29 @@ class MonitorWorker(threading.Thread):
 class SimulationWorker(MonitorWorker):
     """Transmit generated BMS data on the GCAN adapter and mirror it into the UI."""
 
+    TOGGLE_ALARM_LABELS = {"LowLevel Alarm", "CriticalLow Alarm"}
+
+    def __init__(
+        self,
+        config: DeviceConfig,
+        source_address: int,
+        event_queue: queue.Queue[tuple[str, object]],
+        command_queue: queue.Queue[tuple[str, object]],
+        stop_event: threading.Event,
+    ):
+        super().__init__(config, source_address, event_queue, command_queue, stop_event)
+        self.alarm_states = {label: False for label in self.TOGGLE_ALARM_LABELS}
+
+    def _handle_command(self, node: J1939Node, command: str, payload: object) -> None:
+        if command == "toggle_sim_alarm":
+            label = str(payload)
+            if label in self.alarm_states:
+                self.alarm_states[label] = not self.alarm_states[label]
+                state_text = "ON" if self.alarm_states[label] else "OFF"
+                self.event_queue.put(("status", f"Simulation {label} toggled {state_text}"))
+            return
+        super()._handle_command(node, command, payload)
+
     def run(self) -> None:
         device: GCANDevice | None = None
         try:
@@ -907,7 +931,7 @@ class SimulationWorker(MonitorWorker):
             self.event_queue.put(("stopped", None))
 
     def _transmit_simulated_frames(self, device: GCANDevice, elapsed_seconds: float, source_address: int) -> None:
-        for pgn, payload in simulated_bms_payloads(elapsed_seconds).items():
+        for pgn, payload in simulated_bms_payloads(elapsed_seconds, self.alarm_states).items():
             can_id = j1939_id(PRIORITY_INFO, pgn, source_address)
             device.send(can_id, payload)
             self.event_queue.put(("frame", (can_id, payload, parse_j1939_id(can_id))))
@@ -1028,7 +1052,7 @@ class BigScreenWindow(tk.Toplevel):
     FIELD_DEFINITIONS = (
         ("Voltage", "Battery pack voltage"),
         ("Current", "Battery pack net current"),
-        ("Amps", "Battery pack net current"),
+        ("Temp", "Battery pack temperature"),
         ("SOC", "Battery pack SOC"),
         ("Time Rem", "Remaining Time"),
         ("Low. Alarm", "LowLevel Alarm"),
@@ -1201,6 +1225,7 @@ class BmsMonitorApp(tk.Tk):
             self.signal_tree.heading(column, text=heading)
             self.signal_tree.column(column, width=width, anchor="w")
         self.signal_tree.pack(fill="both", expand=True, padx=8, pady=8)
+        self.signal_tree.bind("<ButtonRelease-1>", self._handle_signal_tree_click)
         for definition in SIGNALS:
             key = self._signal_key(definition)
             item = self.signal_tree.insert(
@@ -1209,6 +1234,19 @@ class BmsMonitorApp(tk.Tk):
                 values=(f"0x{definition.pgn:05X}", definition.label, "-", NO_FRAME_TEXT, definition.unit),
             )
             self.signal_rows[key] = item
+
+    def _handle_signal_tree_click(self, _event: tk.Event) -> None:
+        if not self.simulation_active:
+            return
+        selection = self.signal_tree.selection()
+        if not selection:
+            return
+        values = self.signal_tree.item(selection[0], "values")
+        if len(values) < 2:
+            return
+        signal_label = str(values[1])
+        if signal_label in SimulationWorker.TOGGLE_ALARM_LABELS:
+            self.command_queue.put(("toggle_sim_alarm", signal_label))
 
     def _update_simulation_indicator(self) -> None:
         if self.simulation_active or self.simulation_var.get():
