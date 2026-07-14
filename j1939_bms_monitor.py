@@ -523,13 +523,16 @@ def scaled_to_raw(value: float, definition: SignalDefinition) -> int:
 
 def simulated_bms_payloads(elapsed_seconds: float) -> dict[int, bytes]:
     """Create realistic Mastervolt BMS payloads for GCAN simulation mode."""
-    voltage = 52.0 + 3.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 18.0))
+    voltage = 26.0 + 6.0 * math.sin(elapsed_seconds / 18.0)
     current = 35.0 * math.sin(elapsed_seconds / 7.0)
     temperature = 24.0 + 6.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 24.0))
     soc = 50.0 + 35.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 60.0))
     remaining_minutes = int(max(0, soc / 100.0 * 12.0 * 60.0))
-    low_alarm = int(soc < 25.0)
-    critical_alarm = int(soc < 15.0)
+    alarm_cycle_seconds = elapsed_seconds % 60.0
+    low_alarm = int(20.0 <= alarm_cycle_seconds < 30.0)
+    critical_alarm = int(45.0 <= alarm_cycle_seconds < 52.0)
+    if critical_alarm:
+        low_alarm = 1
 
     by_label = {definition.label: definition for definition in SIGNALS}
     prop_00 = bytearray(b"\xFF" * 8)
@@ -1148,7 +1151,7 @@ class BmsMonitorApp(tk.Tk):
         self.status_var = tk.StringVar(value="Disconnected")
         self.simulation_banner_var = tk.StringVar(value="")
 
-        self.start_button = ttk.Button(connection, text="Start", command=self.start_monitoring)
+        self.start_button = ttk.Button(connection, text="Start", command=self.toggle_monitoring)
         self.start_button.grid(row=0, column=0, sticky="w", padx=8, pady=6)
         ttk.Checkbutton(
             connection,
@@ -1283,6 +1286,12 @@ class BmsMonitorApp(tk.Tk):
             if self.device_window is not None and self.device_window.winfo_exists():
                 self.device_window.set_status(status)
 
+    def toggle_monitoring(self) -> None:
+        if self._worker_is_running():
+            self.stop_monitoring()
+        else:
+            self.start_monitoring()
+
     def start_monitoring(self) -> None:
         if self.worker and self.worker.is_alive():
             return
@@ -1300,13 +1309,16 @@ class BmsMonitorApp(tk.Tk):
         worker_class = SimulationWorker if self.simulation_var.get() else MonitorWorker
         self.worker = worker_class(config, source_address, self.event_queue, self.command_queue, self.stop_event)
         self.worker.start()
-        self.start_button.configure(state="disabled")
+        self.start_button.configure(text="Stop", state="normal")
         self.status_var.set("Starting simulation..." if self.simulation_var.get() else "Connecting...")
         self._set_simulation_active(self.simulation_var.get())
 
     def stop_monitoring(self) -> None:
+        if not self._worker_is_running():
+            return
         self.stop_event.set()
-        self.status_var.set("Stopping...")
+        self.start_button.configure(state="disabled")
+        self.status_var.set("Stopping simulation..." if self.simulation_active else "Stopping monitoring...")
 
     def restore_defaults(self) -> None:
         if not messagebox.askyesno(
@@ -1364,7 +1376,7 @@ class BmsMonitorApp(tk.Tk):
             elif event == "simulation":
                 self._set_simulation_active(bool(payload))
             elif event == "stopped":
-                self.start_button.configure(state="normal")
+                self.start_button.configure(text="Start", state="normal")
                 if not self.stop_event.is_set() and not self.status_var.get().startswith("Error"):
                     self.status_var.set("Disconnected")
                 elif self.stop_event.is_set():
