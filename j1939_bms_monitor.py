@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import math
 import queue
 import sys
 import threading
@@ -99,6 +100,7 @@ PGN_PROP_00 = 0x00FF00
 PGN_PROP_01 = 0x00FF01
 MONITORED_PGNS = (PGN_PROP_00, PGN_PROP_01)
 SIGNAL_TIMEOUT_SECONDS = 10.0
+SIMULATION_PERIOD_SECONDS = 1.0
 NO_FRAME_TEXT = "No frame"
 TIMEOUT_TEXT = "timeout"
 
@@ -506,6 +508,53 @@ def format_signal_value(definition: SignalDefinition, data: bytes) -> tuple[str,
     return format_scaled_value(scaled, definition), raw_text
 
 
+def encode_little_endian_field(data: bytearray, start_bit: int, length: int, value: int) -> None:
+    """Write an unsigned little-endian signal field into an 8-byte payload."""
+    raw = int.from_bytes(bytes(data[:8]), "little")
+    mask = ((1 << length) - 1) << start_bit
+    raw = (raw & ~mask) | ((value << start_bit) & mask)
+    data[:8] = raw.to_bytes(8, "little")
+
+
+def scaled_to_raw(value: float, definition: SignalDefinition) -> int:
+    """Convert a physical signal value into the raw integer for simulation."""
+    return max(0, min((1 << definition.bit_length) - 1, round((value - definition.offset) / definition.factor)))
+
+
+def simulated_bms_payloads(elapsed_seconds: float) -> dict[int, bytes]:
+    """Create realistic Mastervolt BMS payloads for GCAN simulation mode."""
+    voltage = 52.0 + 3.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 18.0))
+    current = 35.0 * math.sin(elapsed_seconds / 7.0)
+    temperature = 24.0 + 6.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 24.0))
+    soc = 50.0 + 35.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 60.0))
+    remaining_minutes = int(max(0, soc / 100.0 * 12.0 * 60.0))
+    low_alarm = int(soc < 25.0)
+    critical_alarm = int(soc < 15.0)
+
+    by_label = {definition.label: definition for definition in SIGNALS}
+    prop_00 = bytearray(b"\xFF" * 8)
+    for label, physical_value in (
+        ("Battery pack voltage", voltage),
+        ("Battery pack net current", current),
+        ("Battery pack temperature", temperature),
+    ):
+        definition = by_label[label]
+        raw_value = scaled_to_raw(physical_value, definition)
+        encode_little_endian_field(prop_00, definition.start_bit_index, definition.bit_length, raw_value)
+
+    prop_01 = bytearray(b"\x00" * 8)
+    for label, raw_value in (
+        ("LowLevel Alarm", low_alarm),
+        ("CriticalLow Alarm", critical_alarm),
+        ("Remaining Time", remaining_minutes),
+        ("Battery pack SOC", scaled_to_raw(soc, by_label["Battery pack SOC"])),
+    ):
+        definition = by_label[label]
+        encode_little_endian_field(prop_01, definition.start_bit_index, definition.bit_length, raw_value)
+    prop_01[6:] = b"\xFF\xFF"
+    return {PGN_PROP_00: bytes(prop_00), PGN_PROP_01: bytes(prop_01)}
+
+
 def decode_name(source_address: int, name: int, last_seen: float | None = None) -> ClaimedDevice:
     return ClaimedDevice(
         source_address=source_address,
@@ -818,6 +867,49 @@ class MonitorWorker(threading.Thread):
         self.event_queue.put(("device_info", (parsed.source_address, decode_component_identification(payload))))
 
 
+class SimulationWorker(MonitorWorker):
+    """Transmit generated BMS data on the GCAN adapter and mirror it into the UI."""
+
+    def run(self) -> None:
+        device: GCANDevice | None = None
+        try:
+            device = GCANDevice(self.config)
+            device.open()
+            node = J1939Node(device, self.source_address)
+            node.product_text = "Mastervolt BMS Simulator*OpenAI Codex*J1939 Tkinter Monitor*1.0*"
+            node.send_address_claim()
+            self.event_queue.put(("simulation", True))
+            self.event_queue.put(("status", f"SIMULATION active, transmitting as source address 0x{node.source_address:02X}"))
+            started_at = time.monotonic()
+            next_transmit = 0.0
+            while not self.stop_event.is_set():
+                self._process_commands(node)
+                now = time.monotonic()
+                if now >= next_transmit:
+                    self._transmit_simulated_frames(device, now - started_at, node.source_address)
+                    next_transmit = now + SIMULATION_PERIOD_SECONDS
+                for can_id, data in device.receive(max_frames=25, wait_ms=10):
+                    node.handle_frame(can_id, data)
+                    self._handle_bus_discovery_frame(parse_j1939_id(can_id), data)
+                time.sleep(0.02)
+        except Exception as exc:  # noqa: BLE001 - worker must report all hardware/DLL failures to the UI
+            self.event_queue.put(("error", str(exc)))
+        finally:
+            if device is not None:
+                try:
+                    device.close()
+                except Exception:
+                    pass
+            self.event_queue.put(("simulation", False))
+            self.event_queue.put(("stopped", None))
+
+    def _transmit_simulated_frames(self, device: GCANDevice, elapsed_seconds: float, source_address: int) -> None:
+        for pgn, payload in simulated_bms_payloads(elapsed_seconds).items():
+            can_id = j1939_id(PRIORITY_INFO, pgn, source_address)
+            device.send(can_id, payload)
+            self.event_queue.put(("frame", (can_id, payload, parse_j1939_id(can_id))))
+
+
 # ---------------------------------------------------------------------------
 # Tkinter user interface
 # ---------------------------------------------------------------------------
@@ -955,6 +1047,14 @@ class BigScreenWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.value_vars: dict[str, tk.StringVar] = {}
 
+        banner = ttk.Label(
+            self,
+            textvariable=app.simulation_banner_var,
+            foreground="red",
+            font=("Arial", 20, "bold"),
+        )
+        banner.pack(fill="x", padx=24, pady=(18, 0))
+
         content = ttk.Frame(self, padding=24)
         content.pack(fill="both", expand=True)
         content.columnconfigure(0, weight=0)
@@ -997,6 +1097,7 @@ class BmsMonitorApp(tk.Tk):
         self.command_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_event = threading.Event()
         self.worker: MonitorWorker | None = None
+        self.simulation_active = False
         self.signal_rows: dict[str, str] = {}
         self.signal_update_times: dict[str, float] = {}
         self.signal_values: dict[str, tuple[str, str]] = {}
@@ -1043,16 +1144,28 @@ class BmsMonitorApp(tk.Tk):
         self.source_address_var = tk.StringVar(
             value=setting_as_str(self.settings, "source_address", f"0x{PREFERRED_SOURCE_ADDRESS:02X}")
         )
+        self.simulation_var = tk.BooleanVar(value=bool(self.settings.get("simulation_mode", False)))
         self.status_var = tk.StringVar(value="Disconnected")
+        self.simulation_banner_var = tk.StringVar(value="")
 
-        self.start_button = ttk.Button(connection, text="Start monitoring", command=self.start_monitoring)
+        self.start_button = ttk.Button(connection, text="Start", command=self.start_monitoring)
         self.start_button.grid(row=0, column=0, sticky="w", padx=8, pady=6)
-        ttk.Label(connection, text="Monitor SA").grid(row=0, column=1, sticky="w", padx=(8, 2), pady=6)
+        ttk.Checkbutton(
+            connection,
+            text="Simulation mode",
+            variable=self.simulation_var,
+            command=self._update_simulation_indicator,
+        ).grid(row=0, column=1, sticky="w", padx=(8, 2), pady=6)
+        ttk.Label(connection, text="Monitor SA").grid(row=0, column=2, sticky="w", padx=(8, 2), pady=6)
         ttk.Entry(connection, textvariable=self.source_address_var, width=8).grid(
-            row=0, column=2, sticky="w", padx=(0, 8), pady=6
+            row=0, column=3, sticky="w", padx=(0, 8), pady=6
         )
-        ttk.Label(connection, textvariable=self.status_var).grid(row=0, column=3, sticky="w", padx=8, pady=6)
-        connection.columnconfigure(3, weight=1)
+        ttk.Label(connection, textvariable=self.status_var).grid(row=0, column=4, sticky="w", padx=8, pady=6)
+        ttk.Label(self, textvariable=self.simulation_banner_var, foreground="red", font=("Arial", 12, "bold")).pack(
+            fill="x", padx=10, pady=(0, 4)
+        )
+        connection.columnconfigure(4, weight=1)
+        self._update_simulation_indicator()
 
         pgn_frame = ttk.LabelFrame(self, text="Current monitored PGN frames")
         pgn_frame.pack(fill="x", padx=10, pady=6)
@@ -1093,6 +1206,16 @@ class BmsMonitorApp(tk.Tk):
                 values=(f"0x{definition.pgn:05X}", definition.label, "-", NO_FRAME_TEXT, definition.unit),
             )
             self.signal_rows[key] = item
+
+    def _update_simulation_indicator(self) -> None:
+        if self.simulation_active or self.simulation_var.get():
+            self.simulation_banner_var.set("⚠ SIMULATED DATA - transmitted through GCAN")
+        else:
+            self.simulation_banner_var.set("")
+
+    def _set_simulation_active(self, active: bool) -> None:
+        self.simulation_active = active
+        self._update_simulation_indicator()
 
     def show_big_screen(self) -> BigScreenWindow:
         if self.big_screen_window is None or not self.big_screen_window.winfo_exists():
@@ -1174,10 +1297,12 @@ class BmsMonitorApp(tk.Tk):
         self.stop_event.clear()
         self._reset_pgn_rows()
         self._reset_signal_rows()
-        self.worker = MonitorWorker(config, source_address, self.event_queue, self.command_queue, self.stop_event)
+        worker_class = SimulationWorker if self.simulation_var.get() else MonitorWorker
+        self.worker = worker_class(config, source_address, self.event_queue, self.command_queue, self.stop_event)
         self.worker.start()
         self.start_button.configure(state="disabled")
-        self.status_var.set("Connecting...")
+        self.status_var.set("Starting simulation..." if self.simulation_var.get() else "Connecting...")
+        self._set_simulation_active(self.simulation_var.get())
 
     def stop_monitoring(self) -> None:
         self.stop_event.set()
@@ -1198,6 +1323,8 @@ class BmsMonitorApp(tk.Tk):
         self._skip_settings_save = True
         self.settings = {}
         self.source_address_var.set(f"0x{PREFERRED_SOURCE_ADDRESS:02X}")
+        self.simulation_var.set(False)
+        self._set_simulation_active(False)
         center_window(self, DEFAULT_WINDOW_SIZE)
         self._apply_tree_column_widths(self.pgn_tree, DEFAULT_PGN_COLUMN_WIDTHS)
         self._apply_tree_column_widths(self.signal_tree, DEFAULT_SIGNAL_COLUMN_WIDTHS)
@@ -1234,6 +1361,8 @@ class BmsMonitorApp(tk.Tk):
             elif event == "device_info":
                 source_address, text = payload  # type: ignore[misc]
                 self._show_device_info(int(source_address), str(text))
+            elif event == "simulation":
+                self._set_simulation_active(bool(payload))
             elif event == "stopped":
                 self.start_button.configure(state="normal")
                 if not self.stop_event.is_set() and not self.status_var.get().startswith("Error"):
@@ -1384,6 +1513,7 @@ class BmsMonitorApp(tk.Tk):
         self.update_idletasks()
         return {
             "source_address": self.source_address_var.get().strip() or f"0x{PREFERRED_SOURCE_ADDRESS:02X}",
+            "simulation_mode": bool(self.simulation_var.get()),
             "window_geometry": self.geometry(),
             "device_window_geometry": self._device_window_geometry(),
             "big_screen_geometry": self._big_screen_geometry(),
