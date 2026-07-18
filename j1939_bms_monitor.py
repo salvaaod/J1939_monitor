@@ -1332,13 +1332,9 @@ class BmsMonitorApp(tk.Tk):
             self._refresh_fixed_signal_display(signal_label)
             return
         try:
-            requested_value = float(requested_text)
-        except ValueError:
-            messagebox.showerror(
-                "Fixed simulation value",
-                "Please enter a numeric value, or leave it empty for dynamic mode.",
-                parent=self,
-            )
+            requested_value = self._parse_simulated_value(signal_label, requested_text)
+        except ValueError as exc:
+            messagebox.showerror("Fixed simulation value", str(exc), parent=self)
             return
         self.fixed_simulation_values[signal_label] = requested_value
         self.command_queue.put(("set_sim_value", (signal_label, requested_value)))
@@ -1346,13 +1342,44 @@ class BmsMonitorApp(tk.Tk):
 
     def _editable_numeric_text(self, signal_label: str, current_text: str) -> str:
         if signal_label in self.fixed_simulation_values:
-            return f"{self.fixed_simulation_values[signal_label]:g}"
+            return self._format_editable_simulated_value(signal_label, self.fixed_simulation_values[signal_label])
         normalized = current_text.removeprefix("🔒").strip()
+        if signal_label == "Remaining Time":
+            return "" if normalized == "--:--" else normalized
         try:
             float(normalized)
         except ValueError:
             return ""
         return normalized
+
+    def _format_editable_simulated_value(self, signal_label: str, value: float) -> str:
+        if signal_label == "Remaining Time":
+            return format_remaining_time(max(0, round(value)))
+        return f"{value:g}"
+
+    def _parse_simulated_value(self, signal_label: str, requested_text: str) -> float:
+        if signal_label != "Remaining Time":
+            try:
+                return float(requested_text)
+            except ValueError as exc:
+                raise ValueError("Please enter a numeric value, or leave it empty for dynamic mode.") from exc
+        if ":" not in requested_text:
+            try:
+                minutes = float(requested_text)
+            except ValueError as exc:
+                raise ValueError("Please enter Remaining Time as HH:MM or total minutes, or leave it empty for dynamic mode.") from exc
+            if minutes < 0:
+                raise ValueError("Remaining Time cannot be negative.")
+            return minutes
+        hours_text, minutes_text = requested_text.split(":", 1)
+        try:
+            hours = int(hours_text)
+            minutes = int(minutes_text)
+        except ValueError as exc:
+            raise ValueError("Please enter Remaining Time as HH:MM, for example 10:00.") from exc
+        if hours < 0 or minutes < 0 or minutes >= 60:
+            raise ValueError("Please enter Remaining Time as HH:MM with minutes from 00 to 59.")
+        return float(hours * 60 + minutes)
 
     def _display_signal_value(self, signal_label: str, value: str) -> str:
         if signal_label in self.fixed_simulation_values:
