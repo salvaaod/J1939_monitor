@@ -23,7 +23,7 @@ import time
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 from typing import Any, Iterable
 
 if sys.platform == "win32":
@@ -194,6 +194,13 @@ class SignalDefinition:
 
 
 ALARM_VALUE_MAP = {0: "no", 1: "YES"}
+SIMULATED_NUMERIC_LABELS = {
+    "Battery pack voltage",
+    "Battery pack net current",
+    "Battery pack temperature",
+    "Remaining Time",
+    "Battery pack SOC",
+}
 
 SIGNALS: tuple[SignalDefinition, ...] = (
     SignalDefinition(PGN_PROP_00, "Battery pack voltage", 0, 0, 16, 0.05, 0.0, "V", 0xFFFF),
@@ -521,13 +528,22 @@ def scaled_to_raw(value: float, definition: SignalDefinition) -> int:
     return max(0, min((1 << definition.bit_length) - 1, round((value - definition.offset) / definition.factor)))
 
 
-def simulated_bms_payloads(elapsed_seconds: float, alarm_states: dict[str, bool] | None = None) -> dict[int, bytes]:
+def simulated_bms_payloads(
+    elapsed_seconds: float,
+    alarm_states: dict[str, bool] | None = None,
+    simulated_values: dict[str, float] | None = None,
+) -> dict[int, bytes]:
     """Create realistic Mastervolt BMS payloads for GCAN simulation mode."""
-    voltage = 26.0 + 6.0 * math.sin(elapsed_seconds / 18.0)
-    current = 35.0 * math.sin(elapsed_seconds / 7.0)
-    temperature = 24.0 + 6.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 24.0))
-    soc = 50.0 + 35.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 60.0))
-    remaining_minutes = int(max(0, soc / 100.0 * 12.0 * 60.0))
+    default_voltage = 26.0 + 6.0 * math.sin(elapsed_seconds / 18.0)
+    default_current = 35.0 * math.sin(elapsed_seconds / 7.0)
+    default_temperature = 24.0 + 6.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 24.0))
+    default_soc = 50.0 + 35.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 60.0))
+    simulated_values = simulated_values or {}
+    voltage = simulated_values.get("Battery pack voltage", default_voltage)
+    current = simulated_values.get("Battery pack net current", default_current)
+    temperature = simulated_values.get("Battery pack temperature", default_temperature)
+    soc = simulated_values.get("Battery pack SOC", default_soc)
+    remaining_minutes = int(max(0, simulated_values.get("Remaining Time", soc / 100.0 * 12.0 * 60.0)))
     alarm_states = alarm_states or {}
     low_alarm = int(alarm_states.get("LowLevel Alarm", False))
     critical_alarm = int(alarm_states.get("CriticalLow Alarm", False))
@@ -886,6 +902,8 @@ class SimulationWorker(MonitorWorker):
     ):
         super().__init__(config, source_address, event_queue, command_queue, stop_event)
         self.alarm_states = {label: False for label in self.TOGGLE_ALARM_LABELS}
+        self.fixed_simulation_values: dict[str, float] = {}
+        self.dynamic_raw_values: dict[str, int] = {}
 
     def _handle_command(self, node: J1939Node, command: str, payload: object) -> None:
         if command == "toggle_sim_alarm":
@@ -894,6 +912,20 @@ class SimulationWorker(MonitorWorker):
                 self.alarm_states[label] = not self.alarm_states[label]
                 state_text = "ON" if self.alarm_states[label] else "OFF"
                 self.event_queue.put(("status", f"Simulation {label} toggled {state_text}"))
+            return
+        if command == "set_sim_value":
+            if isinstance(payload, tuple) and len(payload) == 2:
+                label, value = str(payload[0]), float(payload[1])
+                if label in SIMULATED_NUMERIC_LABELS:
+                    self.fixed_simulation_values[label] = value
+                    self.dynamic_raw_values.pop(label, None)
+                    self.event_queue.put(("status", f"Simulation {label} fixed at {value:g}"))
+            return
+        if command == "clear_sim_value":
+            label = str(payload)
+            if self.fixed_simulation_values.pop(label, None) is not None:
+                self.dynamic_raw_values.pop(label, None)
+                self.event_queue.put(("status", f"Simulation {label} returned to dynamic"))
             return
         super()._handle_command(node, command, payload)
 
@@ -931,10 +963,39 @@ class SimulationWorker(MonitorWorker):
             self.event_queue.put(("stopped", None))
 
     def _transmit_simulated_frames(self, device: GCANDevice, elapsed_seconds: float, source_address: int) -> None:
-        for pgn, payload in simulated_bms_payloads(elapsed_seconds, self.alarm_states).items():
+        simulated_values = self._simulated_numeric_values(elapsed_seconds)
+        for pgn, payload in simulated_bms_payloads(elapsed_seconds, self.alarm_states, simulated_values).items():
             can_id = j1939_id(PRIORITY_INFO, pgn, source_address)
             device.send(can_id, payload)
             self.event_queue.put(("frame", (can_id, payload, parse_j1939_id(can_id))))
+
+    def _simulated_numeric_values(self, elapsed_seconds: float) -> dict[str, float]:
+        default_soc = 50.0 + 35.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 60.0))
+        targets = {
+            "Battery pack voltage": 26.0 + 6.0 * math.sin(elapsed_seconds / 18.0),
+            "Battery pack net current": 35.0 * math.sin(elapsed_seconds / 7.0),
+            "Battery pack temperature": 24.0 + 6.0 * (0.5 + 0.5 * math.sin(elapsed_seconds / 24.0)),
+            "Battery pack SOC": default_soc,
+            "Remaining Time": max(0.0, default_soc / 100.0 * 12.0 * 60.0),
+        }
+        by_label = {definition.label: definition for definition in SIGNALS}
+        values: dict[str, float] = {}
+        for label, target in targets.items():
+            definition = by_label[label]
+            if label in self.fixed_simulation_values:
+                raw_value = scaled_to_raw(self.fixed_simulation_values[label], definition)
+            else:
+                target_raw = scaled_to_raw(target, definition)
+                current_raw = self.dynamic_raw_values.get(label, target_raw)
+                if current_raw < target_raw:
+                    raw_value = current_raw + 1
+                elif current_raw > target_raw:
+                    raw_value = current_raw - 1
+                else:
+                    raw_value = current_raw
+            self.dynamic_raw_values[label] = raw_value
+            values[label] = raw_value * definition.factor + definition.offset
+        return values
 
 
 # ---------------------------------------------------------------------------
@@ -1128,6 +1189,7 @@ class BmsMonitorApp(tk.Tk):
         self.signal_rows: dict[str, str] = {}
         self.signal_update_times: dict[str, float] = {}
         self.signal_values: dict[str, tuple[str, str]] = {}
+        self.fixed_simulation_values: set[str] = set()
         self.timed_out_signals: set[str] = set()
         self.pgn_rows: dict[int, str] = {}
         self.pgn_update_times: dict[int, float] = {}
@@ -1235,18 +1297,47 @@ class BmsMonitorApp(tk.Tk):
             )
             self.signal_rows[key] = item
 
-    def _handle_signal_tree_click(self, _event: tk.Event) -> None:
+    def _handle_signal_tree_click(self, event: tk.Event) -> None:
         if not self.simulation_active:
             return
         selection = self.signal_tree.selection()
         if not selection:
             return
         values = self.signal_tree.item(selection[0], "values")
-        if len(values) < 2:
+        if len(values) < 4:
             return
         signal_label = str(values[1])
+        clicked_column = self.signal_tree.identify_column(event.x)
         if signal_label in SimulationWorker.TOGGLE_ALARM_LABELS:
             self.command_queue.put(("toggle_sim_alarm", signal_label))
+            return
+        if clicked_column == "#4" and signal_label in SIMULATED_NUMERIC_LABELS:
+            self._prompt_simulated_value(signal_label, str(values[3]))
+
+    def _prompt_simulated_value(self, signal_label: str, current_text: str) -> None:
+        current_fixed = signal_label in self.fixed_simulation_values
+        if current_fixed:
+            self.fixed_simulation_values.remove(signal_label)
+            self.command_queue.put(("clear_sim_value", signal_label))
+            return
+        initial_value = self._current_numeric_value(current_text)
+        requested_value = simpledialog.askfloat(
+            "Fixed simulation value",
+            f"Set a fixed simulated value for {signal_label}.",
+            initialvalue=initial_value,
+            parent=self,
+        )
+        if requested_value is None:
+            return
+        self.fixed_simulation_values.add(signal_label)
+        self.command_queue.put(("set_sim_value", (signal_label, requested_value)))
+
+    @staticmethod
+    def _current_numeric_value(current_text: str) -> float | None:
+        try:
+            return float(current_text.strip())
+        except ValueError:
+            return None
 
     def _update_simulation_indicator(self) -> None:
         if self.simulation_active or self.simulation_var.get():
@@ -1256,6 +1347,8 @@ class BmsMonitorApp(tk.Tk):
 
     def _set_simulation_active(self, active: bool) -> None:
         self.simulation_active = active
+        if not active:
+            self.fixed_simulation_values.clear()
         self._update_simulation_indicator()
 
     def show_big_screen(self) -> BigScreenWindow:
