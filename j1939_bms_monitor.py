@@ -475,8 +475,10 @@ def extract_little_endian(data: bytes, start_bit: int, length: int) -> int:
     return (raw >> start_bit) & mask
 
 
-def format_raw_value(raw: int, bit_length: int) -> str:
-    """Format raw signal data with enough leading zeros for its bit length."""
+def format_raw_value(raw: int, bit_length: int, *, hexadecimal: bool = True) -> str:
+    """Format raw signal data as hex or decimal for display."""
+    if not hexadecimal:
+        return str(raw)
     hex_digits = max(1, (bit_length + 3) // 4)
     return f"0x{raw:0{hex_digits}X}"
 
@@ -502,9 +504,9 @@ def format_remaining_time(raw_minutes: int) -> str:
     return f"{hours:02d}:{minutes:02d}"
 
 
-def format_signal_value(definition: SignalDefinition, data: bytes) -> tuple[str, str]:
+def format_signal_value(definition: SignalDefinition, data: bytes, *, raw_hexadecimal: bool = True) -> tuple[str, str]:
     raw = extract_little_endian(data, definition.start_bit_index, definition.bit_length)
-    raw_text = format_raw_value(raw, definition.bit_length)
+    raw_text = format_raw_value(raw, definition.bit_length, hexadecimal=raw_hexadecimal)
     if definition.label == "Remaining Time":
         return format_remaining_time(raw), raw_text
     if definition.na_value is not None and raw == definition.na_value:
@@ -1191,6 +1193,7 @@ class BmsMonitorApp(tk.Tk):
         self.signal_update_times: dict[str, float] = {}
         self.signal_values: dict[str, tuple[str, str]] = {}
         self.fixed_simulation_values: dict[str, float] = {}
+        self.raw_values_hexadecimal = True
         self.timed_out_signals: set[str] = set()
         self.pgn_rows: dict[int, str] = {}
         self.pgn_update_times: dict[int, float] = {}
@@ -1281,12 +1284,13 @@ class BmsMonitorApp(tk.Tk):
         for column, heading, width in (
             ("pgn", "PGN", signal_column_widths["pgn"]),
             ("signal", "Signal", signal_column_widths["signal"]),
-            ("raw", "Raw", signal_column_widths["raw"]),
+            ("raw", self._raw_column_heading(), signal_column_widths["raw"]),
             ("value", "Value", signal_column_widths["value"]),
             ("unit", "Units", signal_column_widths["unit"]),
         ):
             self.signal_tree.heading(column, text=heading)
             self.signal_tree.column(column, width=width, anchor="w")
+        self.signal_tree.heading("raw", command=self._toggle_raw_value_format)
         self.signal_tree.pack(fill="both", expand=True, padx=8, pady=8)
         self.signal_tree.bind("<ButtonRelease-1>", self._handle_signal_tree_click)
         for definition in SIGNALS:
@@ -1298,7 +1302,33 @@ class BmsMonitorApp(tk.Tk):
             )
             self.signal_rows[key] = item
 
+
+    def _raw_column_heading(self) -> str:
+        base = "hex" if self.raw_values_hexadecimal else "dec"
+        return f"Raw ({base})"
+
+    def _toggle_raw_value_format(self) -> None:
+        self.raw_values_hexadecimal = not self.raw_values_hexadecimal
+        self.signal_tree.heading("raw", text=self._raw_column_heading(), command=self._toggle_raw_value_format)
+        for definition in SIGNALS:
+            row = self.signal_rows.get(self._signal_key(definition))
+            if not row:
+                continue
+            values = list(self.signal_tree.item(row, "values"))
+            if len(values) < 3:
+                continue
+            try:
+                raw_value = int(str(values[2]), 0)
+            except ValueError:
+                continue
+            values[2] = format_raw_value(raw_value, definition.bit_length, hexadecimal=self.raw_values_hexadecimal)
+            self.signal_tree.item(row, values=values)
+
     def _handle_signal_tree_click(self, event: tk.Event) -> None:
+        clicked_column = self.signal_tree.identify_column(event.x)
+        if clicked_column == "#3":
+            self._toggle_raw_value_format()
+            return
         if not self.simulation_active:
             return
         selection = self.signal_tree.selection()
@@ -1308,7 +1338,6 @@ class BmsMonitorApp(tk.Tk):
         if len(values) < 4:
             return
         signal_label = str(values[1])
-        clicked_column = self.signal_tree.identify_column(event.x)
         if signal_label in SimulationWorker.TOGGLE_ALARM_LABELS:
             self.command_queue.put(("toggle_sim_alarm", signal_label))
             return
@@ -1665,7 +1694,7 @@ class BmsMonitorApp(tk.Tk):
         for definition in SIGNALS:
             if definition.pgn != parsed.pgn:
                 continue
-            value, raw = format_signal_value(definition, data)
+            value, raw = format_signal_value(definition, data, raw_hexadecimal=self.raw_values_hexadecimal)
             key = self._signal_key(definition)
             row = self.signal_rows[key]
             display_value = self._display_signal_value(definition.label, value)
