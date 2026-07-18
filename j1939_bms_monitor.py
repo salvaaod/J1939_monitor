@@ -923,7 +923,8 @@ class SimulationWorker(MonitorWorker):
             return
         if command == "clear_sim_value":
             label = str(payload)
-            if self.fixed_simulation_values.pop(label, None) is not None:
+            if label in self.fixed_simulation_values:
+                self.fixed_simulation_values.pop(label, None)
                 self.dynamic_raw_values.pop(label, None)
                 self.event_queue.put(("status", f"Simulation {label} returned to dynamic"))
             return
@@ -1189,7 +1190,7 @@ class BmsMonitorApp(tk.Tk):
         self.signal_rows: dict[str, str] = {}
         self.signal_update_times: dict[str, float] = {}
         self.signal_values: dict[str, tuple[str, str]] = {}
-        self.fixed_simulation_values: set[str] = set()
+        self.fixed_simulation_values: dict[str, float] = {}
         self.timed_out_signals: set[str] = set()
         self.pgn_rows: dict[int, str] = {}
         self.pgn_update_times: dict[int, float] = {}
@@ -1315,29 +1316,64 @@ class BmsMonitorApp(tk.Tk):
             self._prompt_simulated_value(signal_label, str(values[3]))
 
     def _prompt_simulated_value(self, signal_label: str, current_text: str) -> None:
-        current_fixed = signal_label in self.fixed_simulation_values
-        if current_fixed:
-            self.fixed_simulation_values.remove(signal_label)
-            self.command_queue.put(("clear_sim_value", signal_label))
-            return
-        initial_value = self._current_numeric_value(current_text)
-        requested_value = simpledialog.askfloat(
+        initial_text = self._editable_numeric_text(signal_label, current_text)
+        requested_text = simpledialog.askstring(
             "Fixed simulation value",
-            f"Set a fixed simulated value for {signal_label}.",
-            initialvalue=initial_value,
+            f"Enter a fixed simulated value for {signal_label}.\nLeave empty and press OK to return this value to dynamic mode.",
+            initialvalue=initial_text,
             parent=self,
         )
-        if requested_value is None:
+        if requested_text is None:
             return
-        self.fixed_simulation_values.add(signal_label)
-        self.command_queue.put(("set_sim_value", (signal_label, requested_value)))
-
-    @staticmethod
-    def _current_numeric_value(current_text: str) -> float | None:
+        requested_text = requested_text.strip()
+        if not requested_text:
+            self.fixed_simulation_values.pop(signal_label, None)
+            self.command_queue.put(("clear_sim_value", signal_label))
+            self._refresh_fixed_signal_display(signal_label)
+            return
         try:
-            return float(current_text.strip())
+            requested_value = float(requested_text)
         except ValueError:
-            return None
+            messagebox.showerror(
+                "Fixed simulation value",
+                "Please enter a numeric value, or leave it empty for dynamic mode.",
+                parent=self,
+            )
+            return
+        self.fixed_simulation_values[signal_label] = requested_value
+        self.command_queue.put(("set_sim_value", (signal_label, requested_value)))
+        self._refresh_fixed_signal_display(signal_label)
+
+    def _editable_numeric_text(self, signal_label: str, current_text: str) -> str:
+        if signal_label in self.fixed_simulation_values:
+            return f"{self.fixed_simulation_values[signal_label]:g}"
+        normalized = current_text.removeprefix("🔒").strip()
+        try:
+            float(normalized)
+        except ValueError:
+            return ""
+        return normalized
+
+    def _display_signal_value(self, signal_label: str, value: str) -> str:
+        if signal_label in self.fixed_simulation_values:
+            return f"🔒 {value}"
+        return value
+
+    def _refresh_fixed_signal_display(self, signal_label: str) -> None:
+        definition = next((definition for definition in SIGNALS if definition.label == signal_label), None)
+        if definition is None:
+            return
+        row = self.signal_rows.get(self._signal_key(definition))
+        if not row:
+            return
+        values = list(self.signal_tree.item(row, "values"))
+        if len(values) < 5:
+            return
+        base_value = str(values[3]).removeprefix("🔒").strip()
+        values[3] = self._display_signal_value(signal_label, base_value)
+        self.signal_tree.item(row, values=values)
+        self.signal_values[signal_label] = (values[3], str(values[4]))
+        self._refresh_big_screen()
 
     def _update_simulation_indicator(self) -> None:
         if self.simulation_active or self.simulation_var.get():
@@ -1605,8 +1641,9 @@ class BmsMonitorApp(tk.Tk):
             value, raw = format_signal_value(definition, data)
             key = self._signal_key(definition)
             row = self.signal_rows[key]
-            self.signal_tree.item(row, values=(f"0x{definition.pgn:05X}", definition.label, raw, value, definition.unit))
-            self.signal_values[definition.label] = (value, definition.unit)
+            display_value = self._display_signal_value(definition.label, value)
+            self.signal_tree.item(row, values=(f"0x{definition.pgn:05X}", definition.label, raw, display_value, definition.unit))
+            self.signal_values[definition.label] = (display_value, definition.unit)
             self.signal_update_times[key] = updated_at
             self.timed_out_signals.discard(key)
         self._refresh_big_screen()
