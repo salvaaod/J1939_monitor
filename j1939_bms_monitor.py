@@ -62,6 +62,8 @@ TIMING0_250K = 0x01
 TIMING1_250K = 0x1C
 TIMING0_500K = 0x00
 TIMING1_500K = 0x1C
+SEND_TYPE_NORMAL = 0
+SEND_TYPE_SINGLE_SHOT = 1
 
 
 def app_directory() -> Path:
@@ -617,6 +619,7 @@ def decode_component_identification(payload: bytes) -> str:
 class GCANDevice:
     def __init__(self, config: DeviceConfig):
         self.config = config
+        self.default_send_type = SEND_TYPE_NORMAL
         self.dll = ctypes.WinDLL(default_dll_path())
         self._bind_functions()
 
@@ -656,7 +659,7 @@ class GCANDevice:
     def close(self) -> None:
         self.dll.CloseDevice(self.config.device_type, self.config.device_index)
 
-    def send(self, frame_id: int, data: bytes | list[int]) -> int:
+    def send(self, frame_id: int, data: bytes | list[int], send_type: int | None = None) -> int:
         payload = bytes(data)
         if len(payload) > 8:
             raise ValueError("Classic CAN payload must be 8 bytes or less")
@@ -664,7 +667,7 @@ class GCANDevice:
         can_obj.ID = frame_id
         can_obj.TimeStamp = 0
         can_obj.TimeFlag = 0
-        can_obj.SendType = 0
+        can_obj.SendType = self.default_send_type if send_type is None else send_type
         can_obj.RemoteFlag = 0
         can_obj.ExternFlag = 1
         can_obj.DataLen = len(payload)
@@ -937,6 +940,11 @@ class SimulationWorker(MonitorWorker):
         try:
             device = GCANDevice(self.config)
             device.open()
+            # Single-shot transmission prevents the CAN controller from getting stuck
+            # retrying a frame forever when no other node acknowledges it.  The
+            # simulation loop keeps queueing fresh frames at the configured period
+            # regardless of ACK/bus errors reported by the adapter.
+            device.default_send_type = SEND_TYPE_SINGLE_SHOT
             node = J1939Node(device, self.source_address)
             node.product_text = "Mastervolt BMS Simulator*OpenAI Codex*J1939 Tkinter Monitor*1.0*"
             node.send_address_claim()
